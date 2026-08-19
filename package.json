@@ -11,11 +11,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "gate": "pnpm typecheck && pnpm test && pnpm build",
-    "start:http": "node dist/http.js",
-    "start:stdio": "node dist/stdio.js",
+    "start:http": "node dist/src/http.js",
+    "start:stdio": "node dist/src/stdio.js",
     "dev:http": "tsx src/http.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "zod": "^4.4.3"
   },
