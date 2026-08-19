@@ -19,6 +19,16 @@ function fakeAdapter(): ComputerAdapter {
     async exec() { return { exitCode: 0, stdout: 'ok', stderr: '', durationMs: 1, timedOut: false }; },
     async listProcesses() { return [{ pid: 1, command: 'init' }]; },
     async killProcess() {},
+    async serviceStatus(name) { return { name, activeState: 'active', subState: 'running', description: 'test service' }; },
+    async serviceControl() {},
+    async launchApplication() { return { handle: 'app_test', pid: 42 }; },
+    async closeApplication() {},
+    async openBrowser() {},
+    async captureScreen() { return { mimeType: 'image/png', data: Buffer.from('png').toString('base64'), bytes: 3 }; },
+    async movePointer() {},
+    async clickPointer() {},
+    async typeText() {},
+    async pressKey() {},
   };
 }
 
@@ -59,14 +69,34 @@ test('tool discovery exposes only granted capability families', async () => {
   }
 });
 
+test('tool discovery exposes the complete extended capability surface when granted', async () => {
+  const { client, server } = await harness({
+    service: { enabled: true, allowedServices: ['*'] },
+    application: { enabled: true, applications: { editor: { command: 'editor' } } },
+    browser: { enabled: true },
+    desktop: { screenCapture: true, input: true },
+  });
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name).sort();
+    assert.deepEqual(names, [
+      'app.close', 'app.launch', 'browser.open', 'input.click', 'input.key', 'input.move', 'input.type',
+      'screen.capture', 'service.control', 'service.status', 'system.info',
+    ]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test('system.info returns structured capability information', async () => {
-  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['node'] } });
+  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['node'] }, desktop: { input: true } });
   try {
     const result = await client.callTool({ name: 'system.info', arguments: {} });
     assert.equal(result.isError, undefined);
-    const body = result.structuredContent as { hostname?: string; capabilities?: { shell?: boolean } } | undefined;
+    const body = result.structuredContent as { hostname?: string; capabilities?: { shell?: boolean; input?: boolean } } | undefined;
     assert.equal(body?.hostname, 'test');
     assert.equal(body?.capabilities?.shell, true);
+    assert.equal(body?.capabilities?.input, true);
   } finally {
     await client.close();
     await server.close();
@@ -100,6 +130,56 @@ test('shell tool delegates argument-array execution unchanged', async () => {
     const result = await client.callTool({ name: 'shell.exec', arguments: { command: 'node', args: ['--version'], timeoutMs: 100 } });
     assert.equal(result.isError, undefined);
     assert.deepEqual(seen, { command: 'node', args: ['--version'], timeoutMs: 100 });
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('application launch returns an explicit handle and close consumes that handle', async () => {
+  const calls: unknown[] = [];
+  const adapter = fakeAdapter();
+  adapter.launchApplication = async (name, args) => {
+    calls.push(['launch', name, args]);
+    return { handle: 'app_123', pid: 77 };
+  };
+  adapter.closeApplication = async handle => { calls.push(['close', handle]); };
+  const { client, server } = await harness({
+    application: { enabled: true, applications: { editor: { command: 'editor', allowArguments: true } } },
+  }, adapter);
+  try {
+    const launched = await client.callTool({ name: 'app.launch', arguments: { name: 'editor', args: ['file.txt'] } });
+    assert.deepEqual(launched.structuredContent, { handle: 'app_123', pid: 77 });
+    const closed = await client.callTool({ name: 'app.close', arguments: { handle: 'app_123' } });
+    assert.equal(closed.isError, undefined);
+    assert.deepEqual(calls, [['launch', 'editor', ['file.txt']], ['close', 'app_123']]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('screen capture returns MCP image content and compact structured metadata', async () => {
+  const { client, server } = await harness({ desktop: { screenCapture: true } });
+  try {
+    const result = await client.callTool({ name: 'screen.capture', arguments: {} });
+    assert.deepEqual(result.structuredContent, { mimeType: 'image/png', bytes: 3 });
+    assert.equal(result.content.some(item => item.type === 'image'), true);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('input click schema rejects a lone coordinate before adapter invocation', async () => {
+  let called = false;
+  const adapter = fakeAdapter();
+  adapter.clickPointer = async () => { called = true; };
+  const { client, server } = await harness({ desktop: { input: true } }, adapter);
+  try {
+    const result = await client.callTool({ name: 'input.click', arguments: { x: 10 } });
+    assert.equal(result.isError, true);
+    assert.equal(called, false);
   } finally {
     await client.close();
     await server.close();
