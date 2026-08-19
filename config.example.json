@@ -1,0 +1,25 @@
+{
+  "http": {
+    "host": "127.0.0.1",
+    "port": 3210
+  },
+  "filesystem": {
+    "read": true,
+    "write": true,
+    "roots": ["/home/YOU/projects", "/home/YOU/Downloads"],
+    "maxReadBytes": 1048576,
+    "maxWriteBytes": 4194304
+  },
+  "shell": {
+    "enabled": true,
+    "allowedCommands": ["git", "node", "pnpm", "npm", "python3", "bash"],
+    "maxRuntimeMs": 120000,
+    "maxOutputBytes": 4194304,
+    "allowEnvironment": false
+  },
+  "process": {
+    "list": true,
+    "kill": false
+  },
+  "logLevel": "info"
+}

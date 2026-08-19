@@ -1,0 +1,27 @@
+{
+  "name": "@platform-modules/chatgpt-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Stateless MCP server exposing explicitly configured computer capabilities to ChatGPT.",
+  "engines": { "node": ">=22" },
+  "packageManager": "pnpm@9.7.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "gate": "pnpm typecheck && pnpm test && pnpm build",
+    "start:http": "node dist/http.js",
+    "start:stdio": "node dist/stdio.js",
+    "dev:http": "tsx src/http.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.0"
+  }
+}
