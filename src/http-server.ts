@@ -113,7 +113,15 @@ export function createComputerHttpServer(
     }
 
     if (!requireBearer(req, res, config.http.token)) return;
-    void nodeHandler(req, res);
+    if (req.method === undefined) {
+      writeJson(res, 400, { error: 'missing_method' });
+      return;
+    }
+
+    // Node's IncomingMessage types model `method` as optional, while the MCP
+    // node bridge models it as required. A real server request has a method;
+    // the guard above makes this cast the explicit type seam between the two.
+    void nodeHandler(req as Parameters<typeof nodeHandler>[0], res);
   });
 
   return { server, closeHandler: handler.close };
