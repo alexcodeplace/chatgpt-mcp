@@ -2,8 +2,6 @@
 
 A stateless MCP server that exposes explicitly configured capabilities on your computer to ChatGPT or any compatible MCP client.
 
-The project is intentionally thin:
-
 ```text
 ChatGPT / MCP client
         |
@@ -16,13 +14,13 @@ chatgpt-mcp
 local operating system
 ```
 
-ChatGPT chooses which tool to call. `chatgpt-mcp` validates the call against your local capability configuration and performs the operation. It does not run a second planner and it does not add its own interactive approval loop.
+ChatGPT chooses which tool to call. `chatgpt-mcp` validates the call against your local capability configuration and performs the operation. It is a thin protocol adapter, not a second planner, and it does not add its own interactive approval loop.
 
 The authoritative architecture is in [`SPEC.md`](./SPEC.md). Delivery sequencing is in [`PLAN.md`](./PLAN.md).
 
-## Current capabilities
+## Capabilities
 
-Milestone 1 exposes:
+Every family except `system.info` is opt-in. Disabled capability families are omitted from MCP tool discovery where practical.
 
 | Tool | Purpose |
 | --- | --- |
@@ -36,8 +34,16 @@ Milestone 1 exposes:
 | `shell.exec` | Spawn one allowed executable with an argument array; no implicit shell |
 | `process.list` | List visible processes |
 | `process.kill` | Send a signal to a PID |
-
-Disabled capability families are omitted from MCP tool discovery where practical.
+| `service.status` | Read an allowed system service state |
+| `service.control` | Start, stop, or restart an allowed service |
+| `app.launch` | Launch a configured named application and return an opaque handle |
+| `app.close` | Close an application previously launched through its handle |
+| `browser.open` | Open an allowed URL scheme through the configured browser opener |
+| `screen.capture` | Capture the desktop and return an MCP PNG image content block |
+| `input.move` | Move the desktop pointer |
+| `input.click` | Click the desktop pointer, optionally at coordinates |
+| `input.type` | Type literal text into the focused application |
+| `input.key` | Send a key sequence to the focused application |
 
 ## Protocol and transports
 
@@ -46,28 +52,34 @@ The canonical protocol is MCP `2026-07-28`.
 - **HTTP:** stateless Streamable HTTP at `/mcp`; the SDK creates a fresh MCP server instance for every request.
 - **stdio:** the same server factory through the SDK v2 `serveStdio()` entrypoint.
 - No application code depends on `Mcp-Session-Id` or hidden client session state.
-- Future long-running operations must return explicit handles that later calls pass back.
+- The only continuity in the current surface is explicit: `app.launch` returns a bounded opaque handle that must be passed to `app.close`.
 
 HTTP binds to `127.0.0.1:3210` by default. `/healthz` is also exposed.
 
 ## Requirements
 
+Core server:
+
 - Node.js 22+
 - pnpm 9.x
-- Linux for the current process-listing implementation (`ps`)
+- Linux/Unix `ps` for `process.list`
 
-If pnpm is not installed and Corepack is available:
+Optional Linux host commands depend on what you enable:
 
-```sh
-corepack enable
-corepack prepare pnpm@9.7.0 --activate
-```
+- services: `systemctl` by default (configurable)
+- browser opening: `xdg-open` by default (configurable)
+- desktop input: `xdotool`
+- screenshots: one of `grim`, `gnome-screenshot`, `scrot`, or ImageMagick `import`
+
+No optional desktop command is required when its capability is disabled.
 
 ## Install
 
 ```sh
 git clone https://github.com/platform-modules/chatgpt-mcp.git
 cd chatgpt-mcp
+corepack enable
+corepack prepare pnpm@9.7.0 --activate
 pnpm install
 pnpm gate
 ```
@@ -76,44 +88,96 @@ pnpm gate
 
 ## Configure
 
-Copy the example:
-
 ```sh
 cp config.example.json config.local.json
 export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
 ```
 
-The default configuration exposes only `system.info`. Filesystem, shell, and process authority are opt-in.
+The default configuration exposes only `system.info`. See [`config.example.json`](./config.example.json) for every capability family.
 
-Example:
+### Minimal filesystem + shell example
 
 ```json
 {
-  "http": {
-    "host": "127.0.0.1",
-    "port": 3210
-  },
   "filesystem": {
     "read": true,
     "write": true,
-    "roots": ["/home/YOU/projects", "/home/YOU/Downloads"],
-    "maxReadBytes": 1048576,
-    "maxWriteBytes": 4194304
+    "roots": ["/home/YOU/projects"]
   },
   "shell": {
     "enabled": true,
-    "allowedCommands": ["git", "node", "pnpm", "npm", "python3", "bash"],
-    "maxRuntimeMs": 120000,
-    "maxOutputBytes": 4194304,
-    "allowEnvironment": false
-  },
-  "process": {
-    "list": true,
-    "kill": false
-  },
-  "logLevel": "info"
+    "allowedCommands": ["git", "node", "pnpm"]
+  }
 }
 ```
+
+### Named application example
+
+Applications are configured by name; the caller does not supply an arbitrary executable through `app.launch`.
+
+```json
+{
+  "application": {
+    "enabled": true,
+    "applications": {
+      "terminal": {
+        "command": "x-terminal-emulator",
+        "args": [],
+        "allowArguments": false
+      },
+      "firefox": {
+        "command": "firefox",
+        "args": [],
+        "allowArguments": true
+      }
+    },
+    "maxTracked": 64
+  }
+}
+```
+
+`app.launch` returns:
+
+```json
+{
+  "handle": "app_...",
+  "pid": 12345
+}
+```
+
+Use the returned `handle`, not a hidden MCP session, with `app.close`.
+
+### Services
+
+```json
+{
+  "service": {
+    "enabled": true,
+    "allowedServices": ["nginx.service", "docker.service"]
+  }
+}
+```
+
+An explicit `"*"` allows any syntactically valid service name.
+
+### Browser and desktop
+
+```json
+{
+  "browser": {
+    "enabled": true,
+    "allowedSchemes": ["http", "https"]
+  },
+  "desktop": {
+    "screenCapture": true,
+    "input": true,
+    "screenBackend": "auto",
+    "inputBackend": "xdotool"
+  }
+}
+```
+
+`screenBackend: "auto"` tries `grim`, `gnome-screenshot`, `scrot`, then ImageMagick `import`.
 
 ### Environment overrides
 
@@ -129,7 +193,7 @@ Configuration is parsed once at startup and deeply frozen.
 
 ### Broad owner-controlled access
 
-If you intentionally want broad local authority, configure it explicitly rather than changing code:
+If you intentionally want broad filesystem/shell/process/service authority, configure it explicitly rather than changing code:
 
 ```json
 {
@@ -150,11 +214,15 @@ If you intentionally want broad local authority, configure it explicitly rather 
   "process": {
     "list": true,
     "kill": true
+  },
+  "service": {
+    "enabled": true,
+    "allowedServices": ["*"]
   }
 }
 ```
 
-`allowedCommands: ["*"]` still means an executable name plus argument array. `shell.exec` does not silently turn the input into `sh -c`.
+`allowedCommands: ["*"]` still means an executable name plus argument array. `shell.exec` never silently turns input into `sh -c`.
 
 ## Start over HTTP
 
@@ -188,7 +256,7 @@ CHATGPT_MCP_CONFIG="$PWD/config.local.json" pnpm start:stdio
 
 stdout is reserved for MCP protocol traffic. Diagnostics are written to stderr.
 
-For a local inspection without ChatGPT:
+For local inspection:
 
 ```sh
 npx @modelcontextprotocol/inspector node dist/src/stdio.js
@@ -196,16 +264,14 @@ npx @modelcontextprotocol/inspector node dist/src/stdio.js
 
 ## Connect to ChatGPT
 
-For a computer that should remain private, use OpenAI Secure MCP Tunnel. The shortest current setup is documented in [`docs/CHATGPT.md`](./docs/CHATGPT.md).
-
-The local layout is:
+For a private computer, use OpenAI Secure MCP Tunnel. The current setup is documented in [`docs/CHATGPT.md`](./docs/CHATGPT.md).
 
 ```text
 ChatGPT
    |
 OpenAI-hosted tunnel endpoint
    |
-   | outbound HTTPS connection initiated by your machine
+   | outbound HTTPS initiated by your machine
    v
 tunnel-client
    |
@@ -216,31 +282,31 @@ tunnel-client
 
 The MCP server does not need a public inbound listener when Secure MCP Tunnel is used.
 
-## Filesystem boundary
+## Trust-boundary behavior
 
-Every filesystem operation uses one central path-authorization module. It:
+### Filesystem
 
-- resolves requested paths;
-- verifies they are within a configured root;
-- rejects sibling-prefix tricks;
-- resolves existing ancestors;
-- rejects symlink escapes, including creation beneath a symlinked ancestor.
+Every filesystem operation passes through one central authorization module. It normalizes paths, checks configured roots, rejects sibling-prefix tricks, resolves existing ancestors, and rejects symlink escapes including creation beneath a symlinked ancestor.
 
-Tests operate only on temporary directories.
+### Shell
 
-## Shell boundary
+`shell.exec` validates the executable allow-list, uses `spawn(..., { shell: false })`, validates `cwd`, clamps runtime, bounds combined output, and controls caller-provided environment entries.
 
-`shell.exec`:
+### Services
 
-- validates the executable against the configured allow-list;
-- uses `child_process.spawn` with `shell: false`;
-- validates `cwd` through the filesystem policy;
-- clamps runtime to the configured maximum;
-- bounds combined stdout/stderr;
-- rejects caller-provided environment entries unless `allowEnvironment` is enabled;
-- returns non-zero process exit codes as normal execution results.
+Service names are checked against the configured allow-list before invoking the configured service manager.
 
-Infrastructure and policy failures are returned as typed adapter/tool errors.
+### Applications
+
+`app.launch` accepts a configured application name, not an arbitrary executable. Caller arguments are independently enabled per application. Handles are bounded by `application.maxTracked` and dead processes are pruned.
+
+### Browser
+
+URLs are parsed before opening and the scheme must be configured. The default schemes are only `http` and `https`.
+
+### Desktop
+
+Desktop input and screenshots are separate opt-in capabilities. Input values and screenshot/text sizes are bounded before operating-system tools are invoked.
 
 ## Development
 
@@ -251,14 +317,19 @@ pnpm build
 pnpm gate
 ```
 
-The test suite covers configuration, structural error contracts, filesystem traversal/symlink escape, shell policy, the local adapter, MCP tool discovery/invocation, modern stateless HTTP, the Node HTTP boundary, and the stdio process entrypoint.
+GitHub Actions runs the same gate on pushes and pull requests.
 
-## Current limitations
+The test suite covers configuration, structural error contracts, filesystem traversal/symlink escape, shell policy, core and extended adapters, tool discovery/delegation, MCP image output, modern stateless HTTP, the Node HTTP boundary, and the stdio process entrypoint.
 
-- Process listing currently targets Linux/Unix `ps` output.
-- GUI/input/service/browser capabilities are a later implementation wave and are not part of Milestone 1 yet.
-- The project does not install or configure OpenAI `tunnel-client` for you.
-- External ChatGPT/tunnel smoke requires your OpenAI tunnel identity/runtime credentials and is therefore an operator validation, not something CI can impersonate.
+## Platform limitations
+
+- The concrete adapter is Linux-oriented today.
+- `process.list` uses `ps`.
+- `service.*` defaults to systemd's `systemctl`.
+- `input.*` currently uses `xdotool`, so native Wayland environments may need XWayland or a future compositor-specific adapter.
+- `screen.capture` supports common Linux screenshot commands; desktop/session permissions still apply.
+- The project does not install OpenAI `tunnel-client` or optional desktop packages.
+- External ChatGPT/tunnel smoke requires the operator's OpenAI tunnel identity/runtime credentials and cannot be impersonated by repository CI.
 
 ## Upstream references
 
