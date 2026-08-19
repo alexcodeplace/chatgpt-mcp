@@ -23,5 +23,41 @@
     "list": true,
     "kill": false
   },
+  "service": {
+    "enabled": false,
+    "allowedServices": ["nginx.service", "docker.service"],
+    "command": "systemctl",
+    "maxRuntimeMs": 30000
+  },
+  "application": {
+    "enabled": false,
+    "applications": {
+      "terminal": {
+        "command": "x-terminal-emulator",
+        "args": [],
+        "allowArguments": false
+      },
+      "firefox": {
+        "command": "firefox",
+        "args": [],
+        "allowArguments": true
+      }
+    },
+    "maxTracked": 64
+  },
+  "browser": {
+    "enabled": false,
+    "command": "xdg-open",
+    "allowedSchemes": ["http", "https"],
+    "maxRuntimeMs": 30000
+  },
+  "desktop": {
+    "screenCapture": false,
+    "input": false,
+    "screenBackend": "auto",
+    "inputBackend": "xdotool",
+    "maxImageBytes": 10485760,
+    "maxTextBytes": 65536
+  },
   "logLevel": "info"
 }
