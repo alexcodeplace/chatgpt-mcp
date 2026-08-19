@@ -67,14 +67,21 @@ const httpSchema = z.object({
 });
 
 const configSchema = z.object({
-  http: httpSchema.default({}),
-  filesystem: filesystemSchema.default({}),
-  shell: shellSchema.default({}),
-  process: processSchema.default({}),
-  service: serviceSchema.default({}),
-  application: applicationSchema.default({}),
-  browser: browserSchema.default({}),
-  desktop: desktopSchema.default({}),
+  http: httpSchema.default({ host: '127.0.0.1', port: 3210, allowedHosts: [], allowedOrigins: [] }),
+  filesystem: filesystemSchema.default({ read: false, write: false, roots: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
+  shell: shellSchema.default({ enabled: false, allowedCommands: [], maxRuntimeMs: 120_000, maxOutputBytes: 4 * 1024 * 1024, allowEnvironment: false }),
+  process: processSchema.default({ list: false, kill: false }),
+  service: serviceSchema.default({ enabled: false, allowedServices: [], command: 'systemctl', maxRuntimeMs: 30_000 }),
+  application: applicationSchema.default({ enabled: false, applications: {}, maxTracked: 64 }),
+  browser: browserSchema.default({ enabled: false, command: 'xdg-open', allowedSchemes: ['http', 'https'], maxRuntimeMs: 30_000 }),
+  desktop: desktopSchema.default({
+    screenCapture: false,
+    input: false,
+    screenBackend: 'auto',
+    inputBackend: 'xdotool',
+    maxImageBytes: 10 * 1024 * 1024,
+    maxTextBytes: 64 * 1024,
+  }),
   logLevel: z.enum(['silent', 'error', 'warn', 'info', 'debug']).default('info'),
 });
 
