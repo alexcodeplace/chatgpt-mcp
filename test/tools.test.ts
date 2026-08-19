@@ -69,12 +69,34 @@ test('tool discovery exposes only granted capability families', async () => {
   }
 });
 
+test('host display master gate omits all display-dependent tools', async () => {
+  const { client, server } = await harness({
+    application: { enabled: true, applications: { editor: { command: 'editor' } } },
+    browser: { enabled: true },
+    desktop: { hostDisplayAccess: false, screenCapture: true, input: true },
+  });
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name).sort();
+    assert.deepEqual(names, ['system.info']);
+    const info = await client.callTool({ name: 'system.info', arguments: {} });
+    const capabilities = (info.structuredContent as { capabilities?: Record<string, boolean> } | undefined)?.capabilities;
+    assert.equal(capabilities?.hostDisplayAccess, false);
+    assert.equal(capabilities?.screenCapture, false);
+    assert.equal(capabilities?.input, false);
+    assert.equal(capabilities?.application, false);
+    assert.equal(capabilities?.browser, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test('tool discovery exposes the complete extended capability surface when granted', async () => {
   const { client, server } = await harness({
     service: { enabled: true, allowedServices: ['*'] },
     application: { enabled: true, applications: { editor: { command: 'editor' } } },
     browser: { enabled: true },
-    desktop: { screenCapture: true, input: true },
+    desktop: { hostDisplayAccess: true, screenCapture: true, input: true },
   });
   try {
     const names = (await client.listTools()).tools.map(tool => tool.name).sort();
@@ -89,7 +111,7 @@ test('tool discovery exposes the complete extended capability surface when grant
 });
 
 test('system.info returns structured capability information', async () => {
-  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['node'] }, desktop: { input: true } });
+  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['node'] }, desktop: { hostDisplayAccess: true, input: true } });
   try {
     const result = await client.callTool({ name: 'system.info', arguments: {} });
     assert.equal(result.isError, undefined);
@@ -146,6 +168,7 @@ test('application launch returns an explicit handle and close consumes that hand
   adapter.closeApplication = async handle => { calls.push(['close', handle]); };
   const { client, server } = await harness({
     application: { enabled: true, applications: { editor: { command: 'editor', allowArguments: true } } },
+    desktop: { hostDisplayAccess: true },
   }, adapter);
   try {
     const launched = await client.callTool({ name: 'app.launch', arguments: { name: 'editor', args: ['file.txt'] } });
@@ -160,7 +183,7 @@ test('application launch returns an explicit handle and close consumes that hand
 });
 
 test('screen capture returns MCP image content and compact structured metadata', async () => {
-  const { client, server } = await harness({ desktop: { screenCapture: true } });
+  const { client, server } = await harness({ desktop: { hostDisplayAccess: true, screenCapture: true } });
   try {
     const result = await client.callTool({ name: 'screen.capture', arguments: {} });
     assert.deepEqual(result.structuredContent, { mimeType: 'image/png', bytes: 3 });
@@ -175,7 +198,7 @@ test('input click schema rejects a lone coordinate before adapter invocation', a
   let called = false;
   const adapter = fakeAdapter();
   adapter.clickPointer = async () => { called = true; };
-  const { client, server } = await harness({ desktop: { input: true } }, adapter);
+  const { client, server } = await harness({ desktop: { hostDisplayAccess: true, input: true } }, adapter);
   try {
     const result = await client.callTool({ name: 'input.click', arguments: { x: 10 } });
     assert.equal(result.isError, true);

@@ -147,6 +147,48 @@ test('caller environment is rejected unless explicitly enabled', async () => {
   }
 });
 
+test('host display denial strips inherited desktop session environment from shell children', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-display-env-'));
+  const previous = {
+    DISPLAY: process.env.DISPLAY,
+    WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
+    XAUTHORITY: process.env.XAUTHORITY,
+    MIR_SOCKET: process.env.MIR_SOCKET,
+    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+  };
+  Object.assign(process.env, {
+    DISPLAY: ':99',
+    WAYLAND_DISPLAY: 'wayland-test',
+    XAUTHORITY: '/tmp/test-xauthority',
+    MIR_SOCKET: '/tmp/test-mir',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/tmp/test-bus',
+  });
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { roots: [root] },
+    shell: { enabled: true, allowedCommands: ['node'], maxRuntimeMs: 2_000, maxOutputBytes: 4096, allowEnvironment: true },
+    desktop: { hostDisplayAccess: false },
+  }));
+  try {
+    const result = await adapter.exec({
+      command: 'node',
+      args: ['-e', 'process.stdout.write(JSON.stringify({DISPLAY:process.env.DISPLAY,WAYLAND_DISPLAY:process.env.WAYLAND_DISPLAY,XAUTHORITY:process.env.XAUTHORITY,MIR_SOCKET:process.env.MIR_SOCKET,DBUS_SESSION_BUS_ADDRESS:process.env.DBUS_SESSION_BUS_ADDRESS}))'],
+      cwd: root,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(JSON.parse(result.stdout), {});
+    await assert.rejects(
+      () => adapter.exec({ command: 'node', args: ['-e', ''], cwd: root, env: { DISPLAY: ':0' } }),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CAPABILITY_DISABLED',
+    );
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('process listing includes the current test process', async () => {
   const { root, adapter } = await fixture();
   try {
