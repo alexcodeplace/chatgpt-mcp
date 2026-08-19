@@ -20,5 +20,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: bash -n install.sh scripts/tunnel-status.sh scripts/tunnel-uninstall.sh
+      - run: node -e 'JSON.parse(require("fs").readFileSync("config.full.example.json", "utf8"))'
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm gate
