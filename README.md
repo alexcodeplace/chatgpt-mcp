@@ -60,9 +60,10 @@ HTTP binds to `127.0.0.1:3210` by default. `/healthz` is also exposed.
 
 Core server:
 
+- Linux
 - Node.js 22+
-- pnpm 9.x
-- Linux/Unix `ps` for `process.list`
+- Corepack or `npx` (the installer obtains pnpm 9.7.0 through one of them)
+- systemd user services for the persistent tunnel installed by `./install.sh`
 
 Optional Linux host commands depend on what you enable:
 
@@ -71,29 +72,141 @@ Optional Linux host commands depend on what you enable:
 - desktop input: `xdotool`
 - screenshots: one of `grim`, `gnome-screenshot`, `scrot`, or ImageMagick `import`
 
-No optional desktop command is required when its capability is disabled.
+The quick installer can install the current official OpenAI `tunnel-client` and common Debian/Ubuntu desktop helpers when they are missing.
 
-## Install
+# Quick install: ChatGPT + your Linux computer
+
+For the normal single-machine setup, use the included installer. It configures `chatgpt-mcp` over stdio, connects it through OpenAI Secure MCP Tunnel, validates the tunnel, and installs a persistent systemd **user** service.
+
+The default quick-install profile intentionally grants broad owner-controlled authority: filesystem read/write from `/`, wildcard executable access through `shell.exec`, process control, service control, browser opening, screenshots, and desktop input where the host supports it. The installer shows this before continuing. For a narrower policy, use the manual configuration section below instead.
+
+## 1. Create an OpenAI MCP tunnel
+
+Open:
+
+**https://platform.openai.com/settings/organization/tunnels**
+
+Create a tunnel (or open an existing one) and copy its ID. It has the form:
+
+```text
+tunnel_0123456789abcdef0123456789abcdef
+```
+
+When the tunnel will be used from ChatGPT, associate it with the ChatGPT workspace/account that should be able to see it. OpenAI currently requires **Tunnels Read + Manage** to create/edit a tunnel and **Tunnels Read + Use** to run `tunnel-client` or select the tunnel while creating the ChatGPT app.
+
+## 2. Create the runtime API key
+
+Open:
+
+**https://platform.openai.com/settings/organization/api-keys**
+
+Create a normal **runtime API key**, not an Admin API key. A restricted key with **Tunnels Read + Use** is sufficient for the long-running tunnel client when your Platform principal also has those permissions.
+
+Keep the resulting `sk-...` key. The installer asks for it with hidden terminal input and stores it locally in `.secrets/runtime-api-key` with mode `0600`.
+
+The two values have different jobs:
+
+```text
+tunnel_...   = which tunnel this computer belongs to
+sk-...       = proves tunnel-client is authorized to use that tunnel
+```
+
+The runtime key is used to authenticate `tunnel-client` to OpenAI's **tunnel control plane**. It is not used by this project to make a model inference request. See [Why does the tunnel need an API key?](#why-does-the-tunnel-need-an-api-key) below.
+
+## 3. Clone and run one installer
 
 ```sh
 git clone https://github.com/platform-modules/chatgpt-mcp.git
 cd chatgpt-mcp
-corepack enable
-corepack prepare pnpm@9.7.0 --activate
-pnpm install
-pnpm gate
+./install.sh
+```
+
+The installer will:
+
+- ask for the tunnel ID and runtime API key if they are not already supplied;
+- protect both values under `.secrets/`;
+- run dependency installation and the full project gate;
+- create `config.local.json` from the broad-control template;
+- install the latest official OpenAI `tunnel-client` on supported Linux architectures if it is missing;
+- install common desktop helpers on Debian/Ubuntu when needed;
+- initialize the `chatgpt-computer` tunnel profile;
+- run `tunnel-client doctor --explain`;
+- install and start `~/.config/systemd/user/chatgpt-mcp-tunnel.service`;
+- verify that the service stays running and re-run tunnel diagnostics.
+
+If you already have the values in environment variables, non-interactive setup is supported:
+
+```sh
+export CONTROL_PLANE_TUNNEL_ID='tunnel_0123456789abcdef0123456789abcdef'
+export CONTROL_PLANE_API_KEY='sk-...'
+./install.sh --yes
+```
+
+Using `export` keeps the key out of the `./install.sh` command line. Do not commit either value.
+
+If you do not want the installer to attempt desktop-package installation:
+
+```sh
+./install.sh --no-desktop
+```
+
+## 4. Add the tunnel to ChatGPT
+
+While the tunnel service is running:
+
+1. In ChatGPT web, open **Settings → Security and login → Developer mode** and enable it.
+2. Open **https://chatgpt.com/plugins**.
+3. Select the plus button and create a developer-mode app.
+4. Under **Connection**, choose **Tunnel**.
+5. Select the tunnel you created, or paste its `tunnel_id` when offered.
+6. Enable the new app in a conversation from the Developer mode tool picker.
+7. First test: `Use my computer MCP's system.info tool and report the hostname and enabled capabilities.`
+
+If the tunnel is not listed, check that it is associated with the target ChatGPT workspace/account and that your Platform principal has **Tunnels Read + Use**.
+
+## Check or remove the local installation
+
+```sh
+./scripts/tunnel-status.sh
+```
+
+To remove the persistent service and disable the local tunnel profile while leaving your repository config/secrets untouched:
+
+```sh
+./scripts/tunnel-uninstall.sh
+```
+
+## Why does the tunnel need an API key?
+
+The API key is an **authentication credential for the tunnel transport**.
+
+ChatGPT cannot directly connect to `localhost` on your Linux computer. `tunnel-client` therefore makes an outbound HTTPS connection to OpenAI, polls for MCP work addressed to your tunnel, forwards those MCP calls to `chatgpt-mcp` locally, and sends the MCP responses back. The runtime API key proves to the OpenAI tunnel control plane that this local daemon is authorized to use that tunnel.
+
+For the ChatGPT Developer Mode path shown here, `chatgpt-mcp` does **not** call an OpenAI model API, and the runtime key is not passed to a model endpoint by this project. The model is the ChatGPT conversation you are already using; the tunnel is the transport that lets that ChatGPT conversation reach your private MCP server.
+
+OpenAI bills API model usage separately from ChatGPT subscriptions. Merely running this tunnel does not turn the ChatGPT conversation into a Responses API/model-token request made by `chatgpt-mcp`. OpenAI's current Secure MCP Tunnel documentation does not publish a separate tunnel-pricing schedule, so this project does not promise that the tunnel service itself will remain unpriced forever. If you separately use OpenAI model APIs, that API usage is billed under the API Platform as usual.
+
+## Manual install / development
+
+If you do not want the broad quick-install policy or do not want a persistent tunnel service, install manually:
+
+```sh
+git clone https://github.com/platform-modules/chatgpt-mcp.git
+cd chatgpt-mcp
+corepack pnpm install
+corepack pnpm gate
 ```
 
 `pnpm gate` runs type checking, behavioral tests, and the TypeScript build.
 
-## Configure
+## Configure manually
 
 ```sh
 cp config.example.json config.local.json
 export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
 ```
 
-The default configuration exposes only `system.info`. See [`config.example.json`](./config.example.json) for every capability family.
+The default configuration exposes only `system.info`. See [`config.example.json`](./config.example.json) for every capability family. `config.local.json` and `.secrets/` are gitignored.
 
 ### Minimal filesystem + shell example
 
@@ -193,42 +306,15 @@ Configuration is parsed once at startup and deeply frozen.
 
 ### Broad owner-controlled access
 
-If you intentionally want broad filesystem/shell/process/service authority, configure it explicitly rather than changing code:
-
-```json
-{
-  "filesystem": {
-    "read": true,
-    "write": true,
-    "roots": ["/"],
-    "maxReadBytes": 16777216,
-    "maxWriteBytes": 16777216
-  },
-  "shell": {
-    "enabled": true,
-    "allowedCommands": ["*"],
-    "maxRuntimeMs": 600000,
-    "maxOutputBytes": 16777216,
-    "allowEnvironment": true
-  },
-  "process": {
-    "list": true,
-    "kill": true
-  },
-  "service": {
-    "enabled": true,
-    "allowedServices": ["*"]
-  }
-}
-```
+[`config.full.example.json`](./config.full.example.json) is the broad policy used by `./install.sh`. If you intentionally want broad filesystem/shell/process/service authority in a manual setup, copy it to `config.local.json` and adjust it before starting the server.
 
 `allowedCommands: ["*"]` still means an executable name plus argument array. `shell.exec` never silently turns input into `sh -c`.
 
 ## Start over HTTP
 
 ```sh
-pnpm build
-CHATGPT_MCP_CONFIG="$PWD/config.local.json" pnpm start:http
+corepack pnpm build
+CHATGPT_MCP_CONFIG="$PWD/config.local.json" corepack pnpm start:http
 ```
 
 Default endpoint:
@@ -250,8 +336,8 @@ A non-loopback HTTP bind is rejected unless `http.allowedHosts` / `CHATGPT_MCP_A
 ## Start over stdio
 
 ```sh
-pnpm build
-CHATGPT_MCP_CONFIG="$PWD/config.local.json" pnpm start:stdio
+corepack pnpm build
+CHATGPT_MCP_CONFIG="$PWD/config.local.json" corepack pnpm start:stdio
 ```
 
 stdout is reserved for MCP protocol traffic. Diagnostics are written to stderr.
@@ -262,9 +348,9 @@ For local inspection:
 npx @modelcontextprotocol/inspector node dist/src/stdio.js
 ```
 
-## Connect to ChatGPT
+## Connect to ChatGPT manually
 
-For a private computer, use OpenAI Secure MCP Tunnel. The current setup is documented in [`docs/CHATGPT.md`](./docs/CHATGPT.md).
+The automated installer above is the preferred single-machine path. The complete manual tunnel procedure is in [`docs/CHATGPT.md`](./docs/CHATGPT.md).
 
 ```text
 ChatGPT
@@ -311,13 +397,13 @@ Desktop input and screenshots are separate opt-in capabilities. Input values and
 ## Development
 
 ```sh
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm gate
+corepack pnpm typecheck
+corepack pnpm test
+corepack pnpm build
+corepack pnpm gate
 ```
 
-GitHub Actions runs the same gate on pushes and pull requests.
+GitHub Actions runs the same gate on pushes and pull requests and also syntax-checks the installer scripts.
 
 The test suite covers configuration, structural error contracts, filesystem traversal/symlink escape, shell policy, core and extended adapters, tool discovery/delegation, MCP image output, modern stateless HTTP, the Node HTTP boundary, and the stdio process entrypoint.
 
@@ -328,12 +414,15 @@ The test suite covers configuration, structural error contracts, filesystem trav
 - `service.*` defaults to systemd's `systemctl`.
 - `input.*` currently uses `xdotool`, so native Wayland environments may need XWayland or a future compositor-specific adapter.
 - `screen.capture` supports common Linux screenshot commands; desktop/session permissions still apply.
-- The project does not install OpenAI `tunnel-client` or optional desktop packages.
-- External ChatGPT/tunnel smoke requires the operator's OpenAI tunnel identity/runtime credentials and cannot be impersonated by repository CI.
+- `./install.sh` can install the latest official `tunnel-client` on Linux amd64/arm64 and common Debian/Ubuntu desktop helpers. Other platforms/package managers may require manual prerequisites.
+- External ChatGPT/tunnel smoke still requires the operator's own OpenAI tunnel identity/runtime credentials; repository CI cannot impersonate them.
 
 ## Upstream references
 
 - MCP TypeScript SDK: https://github.com/modelcontextprotocol/typescript-sdk
 - MCP specification: https://modelcontextprotocol.io/specification/2026-07-28
 - OpenAI Secure MCP Tunnel: https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
+- OpenAI tunnel-client: https://github.com/openai/tunnel-client
+- OpenAI tunnel management: https://platform.openai.com/settings/organization/tunnels
+- OpenAI runtime API keys: https://platform.openai.com/settings/organization/api-keys
 - ChatGPT Developer Mode: https://developers.openai.com/api/docs/guides/developer-mode
