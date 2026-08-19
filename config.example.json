@@ -1,7 +1,9 @@
 {
   "http": {
     "host": "127.0.0.1",
-    "port": 3210
+    "port": 3210,
+    "allowedHosts": [],
+    "allowedOrigins": []
   },
   "filesystem": {
     "read": true,
