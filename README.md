@@ -166,19 +166,52 @@ To skip optional desktop-package installation:
 ./install.sh --no-desktop
 ```
 
-## 4. Add it to ChatGPT
+## 4. Create the ChatGPT plugin
 
-While the tunnel service is running:
+First confirm the local tunnel is healthy:
 
-1. In ChatGPT web, open **Settings → Security and login → Developer mode** and enable it.
-2. Open **https://chatgpt.com/plugins**.
-3. Select the plus button and create a developer-mode app.
-4. Under **Connection**, choose **Tunnel**.
-5. Select the tunnel you created, or paste its `tunnel_id` when offered.
-6. Enable the new app in a conversation.
-7. First test: `Use my computer MCP's system.info tool and report the hostname and enabled capabilities.`
+```sh
+./scripts/tunnel-status.sh
+```
 
-If the tunnel is not listed, verify its ChatGPT workspace association and **Tunnels Read + Use** permission.
+You want to see `Tunnel service: ACTIVE` and `RESULT ok` from `tunnel-client doctor`.
+
+Then, in **ChatGPT web**:
+
+1. Enable **Developer mode** in ChatGPT settings. The exact settings location can vary as the ChatGPT UI changes.
+2. Open the ChatGPT Plugins page directly: **https://chatgpt.com/plugins**
+3. Click the **`+`** button to create a new developer plugin.
+4. In the **New Plugin** dialog, use these values:
+   - **Name:** `ChatGPT-MCP`
+   - **Description:** optional; for example, `Access to my Linux workstation through chatgpt-mcp.`
+   - **Connection:** `Tunnel`
+   - **Available tunnels:** select the tunnel created in step 1. If it is not listed, use **Use tunnel ID instead** and enter the `tunnel_...` ID.
+   - **Authentication:** `No Auth`
+5. Do **not** choose OAuth. `chatgpt-mcp` does not implement an MCP-server OAuth flow; the OpenAI runtime API key already authenticates `tunnel-client` to the tunnel control plane.
+6. Check **I understand and want to continue** after reviewing the custom-MCP warning.
+7. Click **Create**.
+
+Use the plugin name **`ChatGPT-MCP`** in this guide and for normal installations. Do not use the earlier example name `My Computer`.
+
+After creation, start a chat and select **ChatGPT-MCP** from the ChatGPT tools/plugin menu, or refer to it directly in the prompt if your UI offers it. A first read-only test is:
+
+```text
+Use ChatGPT-MCP's system.info tool and report the hostname and enabled capabilities.
+```
+
+Then test filesystem discovery without changing anything:
+
+```text
+Use ChatGPT-MCP to list my Projects directory. Do not modify anything.
+```
+
+### If plugin creation fails
+
+- **`does not implement OAuth`**: set **Authentication** to **No Auth**.
+- **Tunnel not listed**: verify the tunnel is associated with the ChatGPT workspace/account you are using and that the relevant Platform principal has **Tunnels Read + Use**.
+- **Generic `Error creating connector`**: first confirm `./scripts/tunnel-status.sh` still reports `ACTIVE` and `RESULT ok`, then retry creation using the exact plugin name **`ChatGPT-MCP`** and **No Auth**.
+
+OpenAI changes the ChatGPT plugin/app UI over time. The current OpenAI developer-mode guidance is linked under [Upstream references](#upstream-references).
 
 ## Status and uninstall
 
@@ -289,4 +322,5 @@ GitHub Actions runs the same gate on pushes and pull requests and syntax-checks 
 - OpenAI tunnel-client: https://github.com/openai/tunnel-client
 - OpenAI tunnel management: https://platform.openai.com/settings/organization/tunnels
 - OpenAI runtime API keys: https://platform.openai.com/settings/organization/api-keys
-- ChatGPT Developer Mode: https://developers.openai.com/api/docs/guides/developer-mode
+- ChatGPT Plugins page: https://chatgpt.com/plugins
+- ChatGPT Developer Mode / MCP apps: https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta
