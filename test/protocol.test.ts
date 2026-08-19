@@ -37,10 +37,12 @@ test('HTTP handler negotiates MCP 2026-07-28 and uses no session identifier', as
 
     const first = await client.callTool({ name: 'system.info', arguments: {} });
     const second = await client.callTool({ name: 'system.info', arguments: {} });
+    const firstBody = first.structuredContent as { hostname?: unknown } | undefined;
+    const secondBody = second.structuredContent as { hostname?: unknown } | undefined;
     assert.equal(first.isError, undefined);
     assert.equal(second.isError, undefined);
-    assert.equal(typeof first.structuredContent?.hostname, 'string');
-    assert.equal(typeof second.structuredContent?.hostname, 'string');
+    assert.equal(typeof firstBody?.hostname, 'string');
+    assert.equal(typeof secondBody?.hostname, 'string');
     assert.ok(requestCount >= 3);
     assert.equal(requestSessionHeaderSeen, false);
     assert.equal(responseSessionHeaderSeen, false);
