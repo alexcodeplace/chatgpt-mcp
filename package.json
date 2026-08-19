@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Stateless MCP server exposing explicitly configured computer capabilities to ChatGPT.",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "packageManager": "pnpm@11.20.0",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -25,5 +27,6 @@
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
     "typescript": "^6.0.0"
-  }
+  },
+  "license": "MIT"
 }

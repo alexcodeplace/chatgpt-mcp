@@ -130,7 +130,7 @@ sk-...       = permission for tunnel-client to use that tunnel
 ## 3. Clone and run the installer
 
 ```sh
-git clone https://github.com/platform-modules/chatgpt-mcp.git
+git clone https://github.com/alexcodeplace/chatgpt-mcp.git
 cd chatgpt-mcp
 ./install.sh
 ```
@@ -199,7 +199,7 @@ Remove the persistent user service while leaving local config/secrets intact:
 The repository pins pnpm 11.20.0. Corepack can force that exact version without `corepack enable`:
 
 ```sh
-git clone https://github.com/platform-modules/chatgpt-mcp.git
+git clone https://github.com/alexcodeplace/chatgpt-mcp.git
 cd chatgpt-mcp
 corepack pnpm@11.20.0 install
 corepack pnpm@11.20.0 gate

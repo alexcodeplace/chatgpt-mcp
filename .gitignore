@@ -6,3 +6,7 @@ coverage/
 .DS_Store
 .secrets/
 config.local.json
+chatgpt-mcp-activation/
+chatgpt-mcp-activation.zip
+*.service.local
+*.activation
