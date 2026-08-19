@@ -40,6 +40,28 @@ export interface ProcessInfo {
   args?: readonly string[];
 }
 
+export type ServiceAction = 'start' | 'stop' | 'restart';
+
+export interface ServiceStatus {
+  name: string;
+  activeState: string;
+  subState: string;
+  description: string;
+}
+
+export interface ApplicationLaunchResult {
+  handle: string;
+  pid: number;
+}
+
+export interface ScreenCapture {
+  mimeType: 'image/png';
+  data: string;
+  bytes: number;
+}
+
+export type PointerButton = 'left' | 'middle' | 'right';
+
 export interface ComputerAdapter {
   systemInfo(): Promise<SystemInfo>;
   listDirectory(path: string): Promise<readonly FileEntry[]>;
@@ -51,4 +73,14 @@ export interface ComputerAdapter {
   exec(request: ExecRequest): Promise<ExecResult>;
   listProcesses(): Promise<readonly ProcessInfo[]>;
   killProcess(pid: number, signal?: NodeJS.Signals): Promise<void>;
+  serviceStatus(name: string): Promise<ServiceStatus>;
+  serviceControl(name: string, action: ServiceAction): Promise<void>;
+  launchApplication(name: string, args?: readonly string[]): Promise<ApplicationLaunchResult>;
+  closeApplication(handle: string): Promise<void>;
+  openBrowser(url: string): Promise<void>;
+  captureScreen(): Promise<ScreenCapture>;
+  movePointer(x: number, y: number): Promise<void>;
+  clickPointer(button: PointerButton, x?: number, y?: number): Promise<void>;
+  typeText(text: string, delayMs?: number): Promise<void>;
+  pressKey(key: string): Promise<void>;
 }
