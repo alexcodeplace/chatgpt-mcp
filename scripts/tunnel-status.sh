@@ -35,6 +35,7 @@ systemctl --user status "$SERVICE_NAME" --no-pager --lines=15 || true
 if [[ -r "$API_FILE" ]]; then
   export CONTROL_PLANE_API_KEY="$(read_secret "$API_FILE")"
   export CHATGPT_MCP_CONFIG="$REPO/config.local.json"
+  export HEALTH_LISTEN_ADDR="127.0.0.1:0"
   printf '\nTunnel doctor:\n'
   tunnel-client doctor --profile "$PROFILE_NAME" --explain || true
 else
