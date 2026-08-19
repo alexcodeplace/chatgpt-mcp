@@ -23,6 +23,41 @@ const processSchema = z.object({
   kill: z.boolean().default(false),
 });
 
+const serviceSchema = z.object({
+  enabled: z.boolean().default(false),
+  allowedServices: z.array(z.string().min(1)).default([]),
+  command: z.string().min(1).default('systemctl'),
+  maxRuntimeMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
+});
+
+const applicationDefinitionSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  allowArguments: z.boolean().default(false),
+});
+
+const applicationSchema = z.object({
+  enabled: z.boolean().default(false),
+  applications: z.record(z.string().min(1), applicationDefinitionSchema).default({}),
+  maxTracked: z.number().int().positive().max(1024).default(64),
+});
+
+const browserSchema = z.object({
+  enabled: z.boolean().default(false),
+  command: z.string().min(1).default('xdg-open'),
+  allowedSchemes: z.array(z.string().regex(/^[a-z][a-z0-9+.-]*$/i)).default(['http', 'https']),
+  maxRuntimeMs: z.number().int().positive().max(5 * 60 * 1000).default(30_000),
+});
+
+const desktopSchema = z.object({
+  screenCapture: z.boolean().default(false),
+  input: z.boolean().default(false),
+  screenBackend: z.enum(['auto', 'grim', 'gnome-screenshot', 'scrot', 'imagemagick-import']).default('auto'),
+  inputBackend: z.literal('xdotool').default('xdotool'),
+  maxImageBytes: z.number().int().positive().max(64 * 1024 * 1024).default(10 * 1024 * 1024),
+  maxTextBytes: z.number().int().positive().max(1024 * 1024).default(64 * 1024),
+});
+
 const httpSchema = z.object({
   host: z.string().min(1).default('127.0.0.1'),
   port: z.number().int().min(1).max(65535).default(3210),
@@ -36,6 +71,10 @@ const configSchema = z.object({
   filesystem: filesystemSchema.default({}),
   shell: shellSchema.default({}),
   process: processSchema.default({}),
+  service: serviceSchema.default({}),
+  application: applicationSchema.default({}),
+  browser: browserSchema.default({}),
+  desktop: desktopSchema.default({}),
   logLevel: z.enum(['silent', 'error', 'warn', 'info', 'debug']).default('info'),
 });
 
@@ -63,6 +102,10 @@ function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
     filesystem: {
       ...config.filesystem,
       roots: config.filesystem.roots.map(root => resolve(root)),
+    },
+    browser: {
+      ...config.browser,
+      allowedSchemes: config.browser.allowedSchemes.map(value => value.toLowerCase()),
     },
   };
 }
