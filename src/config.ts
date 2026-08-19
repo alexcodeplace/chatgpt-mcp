@@ -23,12 +23,16 @@ const processSchema = z.object({
   kill: z.boolean().default(false),
 });
 
+const httpSchema = z.object({
+  host: z.string().min(1).default('127.0.0.1'),
+  port: z.number().int().min(1).max(65535).default(3210),
+  token: z.string().min(1).optional(),
+  allowedHosts: z.array(z.string().min(1)).default([]),
+  allowedOrigins: z.array(z.string().min(1)).default([]),
+});
+
 const configSchema = z.object({
-  http: z.object({
-    host: z.string().min(1).default('127.0.0.1'),
-    port: z.number().int().min(1).max(65535).default(3210),
-    token: z.string().min(1).optional(),
-  }).default({}),
+  http: httpSchema.default({}),
   filesystem: filesystemSchema.default({}),
   shell: shellSchema.default({}),
   process: processSchema.default({}),
@@ -37,9 +41,25 @@ const configSchema = z.object({
 
 export type ChatGptMcpConfig = z.infer<typeof configSchema>;
 
+function csv(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  return value.split(',').map(part => part.trim()).filter(Boolean);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
 function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
   return {
     ...config,
+    http: {
+      ...config.http,
+      allowedHosts: config.http.allowedHosts.map(value => value.trim()),
+      allowedOrigins: config.http.allowedOrigins.map(value => value.trim()),
+    },
     filesystem: {
       ...config.filesystem,
       roots: config.filesystem.roots.map(root => resolve(root)),
@@ -48,7 +68,7 @@ function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
 }
 
 export function parseConfig(value: unknown): Readonly<ChatGptMcpConfig> {
-  return Object.freeze(normalize(configSchema.parse(value)));
+  return deepFreeze(normalize(configSchema.parse(value)));
 }
 
 export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<Readonly<ChatGptMcpConfig>> {
@@ -58,6 +78,8 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     : {};
 
   const base = configSchema.parse(fileValue);
+  const allowedHosts = csv(env.CHATGPT_MCP_ALLOWED_HOSTS);
+  const allowedOrigins = csv(env.CHATGPT_MCP_ALLOWED_ORIGINS);
   const merged = {
     ...base,
     http: {
@@ -65,6 +87,8 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(env.CHATGPT_MCP_HOST ? { host: env.CHATGPT_MCP_HOST } : {}),
       ...(env.CHATGPT_MCP_PORT ? { port: Number(env.CHATGPT_MCP_PORT) } : {}),
       ...(env.CHATGPT_MCP_TOKEN ? { token: env.CHATGPT_MCP_TOKEN } : {}),
+      ...(allowedHosts ? { allowedHosts } : {}),
+      ...(allowedOrigins ? { allowedOrigins } : {}),
     },
     ...(env.CHATGPT_MCP_LOG_LEVEL ? { logLevel: env.CHATGPT_MCP_LOG_LEVEL } : {}),
   };
