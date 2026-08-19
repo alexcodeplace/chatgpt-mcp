@@ -1,6 +1,6 @@
 # Connect chatgpt-mcp to ChatGPT
 
-This is the shortest private-computer path:
+For one Linux computer, the recommended path is:
 
 ```text
 ChatGPT Developer Mode
@@ -11,91 +11,130 @@ OpenAI-hosted MCP tunnel endpoint
         v
 tunnel-client on your computer
         |
+        | stdio
         v
-chatgpt-mcp (stdio or loopback HTTP)
+chatgpt-mcp
 ```
 
 This guide follows the current OpenAI Secure MCP Tunnel and ChatGPT Developer Mode documentation:
 
 - https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
 - https://developers.openai.com/api/docs/guides/developer-mode
+- https://github.com/openai/tunnel-client
 
-## 1. Build and configure this server
+## Fast path
+
+If you want the broad full-computer configuration, first create the tunnel and runtime key described below, then run:
 
 ```sh
 git clone https://github.com/platform-modules/chatgpt-mcp.git
 cd chatgpt-mcp
-corepack enable
-corepack prepare pnpm@9.7.0 --activate
-pnpm install
-pnpm gate
-cp config.example.json config.local.json
+./install.sh
 ```
 
-Edit `config.local.json` so it grants exactly the local capabilities you want ChatGPT to see.
+The installer asks for the credentials with the API key hidden, builds/tests the server, installs `tunnel-client` if needed, initializes and validates the tunnel profile, and creates a persistent systemd user service.
 
-## 2. Choose stdio or HTTP
-
-### Recommended for one local machine: stdio
-
-Build once:
+Check it later with:
 
 ```sh
-pnpm build
+./scripts/tunnel-status.sh
 ```
 
-The command that the tunnel will spawn is:
+## 1. Create the OpenAI tunnel
 
-```sh
-node /ABSOLUTE/PATH/chatgpt-mcp/dist/src/stdio.js
-```
+Open the exact Platform page:
 
-Set the configuration path in the environment in which `tunnel-client` runs:
+https://platform.openai.com/settings/organization/tunnels
 
-```sh
-export CHATGPT_MCP_CONFIG=/ABSOLUTE/PATH/chatgpt-mcp/config.local.json
-```
-
-### Alternative: loopback HTTP
-
-Start the server:
-
-```sh
-export CHATGPT_MCP_CONFIG=/ABSOLUTE/PATH/chatgpt-mcp/config.local.json
-pnpm start:http
-```
-
-Default MCP URL:
+Create a tunnel or open an existing one. Copy the `tunnel_id`, which looks like:
 
 ```text
-http://127.0.0.1:3210/mcp
+tunnel_0123456789abcdef0123456789abcdef
 ```
 
-Check the local listener:
+For ChatGPT use, make sure the tunnel is associated with the ChatGPT workspace/account that should list it.
 
-```sh
-curl http://127.0.0.1:3210/healthz
-```
+Current OpenAI permission split:
 
-Keep the server bound to loopback when `tunnel-client` is on the same machine.
+- create/edit/delete tunnel: **Tunnels Read + Manage**
+- run `tunnel-client` or select the tunnel in ChatGPT: **Tunnels Read + Use**
 
-## 3. Create an OpenAI MCP tunnel
+Tunnel permissions are organization-level. If you cannot create or use a tunnel, the relevant Platform organization owner/RBAC administrator must grant the permissions.
 
-In OpenAI Platform tunnel settings, create/manage a tunnel and obtain its `tunnel_id` plus a runtime API key usable by `tunnel-client`.
+## 2. Create the runtime API key
 
-Current OpenAI docs call the runtime-key environment variable:
+Open:
+
+https://platform.openai.com/settings/organization/api-keys
+
+Create a normal runtime API key. Do **not** use an Admin API key for the long-lived tunnel daemon.
+
+For least privilege, use a restricted runtime key with **Tunnels Read + Use**. The user/service-account principal that owns the key must also have those tunnel permissions.
+
+The current tunnel-client environment variable is:
 
 ```sh
 export CONTROL_PLANE_API_KEY="sk-..."
 ```
 
-Download the current `tunnel-client` from Platform tunnel settings or the latest public `openai/tunnel-client` release. Do not pin this repository's docs to one binary release URL.
+The installer stores the value in `.secrets/runtime-api-key` with local-only permissions instead of requiring it in your shell profile.
 
-## 4. Configure tunnel-client
+### Why is an API key required?
 
-### stdio profile
+The key authenticates `tunnel-client` to the OpenAI **tunnel control plane**. It tells OpenAI that this local daemon may poll and return MCP work for the selected `tunnel_id`.
 
-Replace the sample tunnel ID and absolute server path:
+It is not used by `chatgpt-mcp` to call an OpenAI model. In the ChatGPT Developer Mode setup, ChatGPT is already the model/client; Secure MCP Tunnel is only the private transport that lets ChatGPT reach your local MCP server without opening an inbound port.
+
+OpenAI API model billing is separate from ChatGPT billing. This project does not make a model API inference with the tunnel runtime key. The current Secure MCP Tunnel documentation does not publish a separate tunnel-pricing schedule; if OpenAI changes tunnel-service pricing later, follow the current Platform documentation.
+
+## 3. Automated installation
+
+From the repository root:
+
+```sh
+./install.sh
+```
+
+The installer accepts credentials from the environment too:
+
+```sh
+export CONTROL_PLANE_TUNNEL_ID='tunnel_0123456789abcdef0123456789abcdef'
+export CONTROL_PLANE_API_KEY='sk-...'
+./install.sh --yes
+```
+
+Do not put the key directly on the `./install.sh ...` command line or commit it to Git.
+
+The quick installer uses [`config.full.example.json`](../config.full.example.json), which grants broad owner-controlled access. For narrower capabilities, configure `config.local.json` manually instead.
+
+## 4. Manual stdio setup
+
+If you do not want the installer, build manually:
+
+```sh
+corepack pnpm install
+corepack pnpm gate
+cp config.example.json config.local.json
+corepack pnpm build
+```
+
+Set the configuration path:
+
+```sh
+export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
+```
+
+The stdio command is:
+
+```sh
+node "$PWD/dist/src/stdio.js"
+```
+
+Download the current `tunnel-client` from Platform tunnel settings or the latest public OpenAI release. OpenAI recommends using the current release rather than pinning an old binary URL:
+
+https://github.com/openai/tunnel-client/releases/latest
+
+Initialize the profile:
 
 ```sh
 tunnel-client init \
@@ -117,19 +156,34 @@ Run it:
 tunnel-client run --profile chatgpt-computer
 ```
 
-### HTTP profile
+Keep the client healthy while creating/testing the ChatGPT app. It only needs outbound HTTPS to OpenAI plus local access to the MCP process; no public inbound listener is required.
 
-Use the same `init` flow, replacing `--mcp-command` with:
+## 5. Optional loopback HTTP path
+
+For a persistent local MCP HTTP endpoint instead of stdio:
 
 ```sh
---mcp-server-url http://127.0.0.1:3210/mcp
+export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
+corepack pnpm start:http
 ```
 
-Then run the same `doctor` and `run` commands.
+Default MCP URL:
 
-If your local HTTP MCP endpoint has `http.token` / `CHATGPT_MCP_TOKEN` enabled, configure the tunnel/client-side MCP authentication accordingly. For the same-host Secure MCP Tunnel path, stdio is simpler because there is no second local HTTP authentication hop.
+```text
+http://127.0.0.1:3210/mcp
+```
 
-## 5. Enable ChatGPT Developer Mode
+Check it:
+
+```sh
+curl http://127.0.0.1:3210/healthz
+```
+
+Initialize the tunnel profile with `--mcp-server-url http://127.0.0.1:3210/mcp` instead of `--mcp-command`.
+
+For one local computer, stdio is simpler because there is no second local HTTP boundary.
+
+## 6. Enable ChatGPT Developer Mode
 
 On ChatGPT web:
 
@@ -139,27 +193,21 @@ Settings
   -> Developer mode
 ```
 
-OpenAI currently documents Developer Mode as available to Pro, Plus, Business, Enterprise, and Education accounts on the web.
+Then open:
 
-## 6. Add the tunnel-backed app
+https://chatgpt.com/plugins
 
-Go to ChatGPT Plugins, select the plus button, and create a developer-mode app.
-
-Choose:
+Select the plus button, create a developer-mode app, and choose:
 
 ```text
 Connection: Tunnel
 ```
 
-Then select the tunnel or provide its `tunnel_id` if prompted.
+Select the tunnel or paste its `tunnel_id` if prompted.
 
-The tunnel must be associated with the ChatGPT workspace/account context that will use it. OpenAI Platform tunnel permissions and ChatGPT Developer Mode permission are separate controls.
+## 7. First calls
 
-## 7. Use it in a conversation
-
-Select **Developer mode** from ChatGPT's Plus menu and enable the app for the conversation.
-
-Useful first checks:
+Enable the app for the conversation and test:
 
 ```text
 Use my computer MCP's system.info tool and report the hostname and enabled capabilities.
@@ -168,39 +216,39 @@ Use my computer MCP's system.info tool and report the hostname and enabled capab
 Then, if filesystem read is enabled:
 
 ```text
-Use fs.list on /home/YOU/projects.
+Use fs.list on my home directory.
 ```
 
-Then test a configured action, for example:
+Then test shell execution if granted:
 
 ```text
 Use shell.exec with command "git" and args ["--version"].
 ```
 
-Tools disabled by `config.local.json` are not supposed to be available for use.
+Tools disabled by `config.local.json` are omitted from discovery where practical.
 
-## 8. Refresh after changing tools
+## 8. Refresh after changing capabilities/tools
 
-When this repository adds/removes MCP tools, refresh the developer-mode app in ChatGPT's app settings so ChatGPT pulls the current tool list and descriptions.
+When the MCP tool surface changes, refresh the developer-mode app in ChatGPT's app settings so ChatGPT pulls the current tool list and descriptions.
 
-## 9. Troubleshooting
+## Troubleshooting
 
 ### Tunnel is not visible in ChatGPT
 
-Verify the tunnel is associated with the target ChatGPT workspace/account context and that your OpenAI Platform role has the required tunnel Read + Use permissions.
+Verify that the tunnel is associated with the target ChatGPT workspace/account, not only the Platform organization, and that the app creator has **Tunnels Read + Use**.
 
 ### Tool calls fail although the app exists
 
-Confirm `tunnel-client run --profile chatgpt-computer` is still running, then:
+Check the installed service:
+
+```sh
+./scripts/tunnel-status.sh
+```
+
+Or, for a manual foreground setup:
 
 ```sh
 tunnel-client doctor --profile chatgpt-computer --explain
-```
-
-For HTTP mode also check:
-
-```sh
-curl http://127.0.0.1:3210/healthz
 ```
 
 ### stdio fails immediately
@@ -212,9 +260,9 @@ CHATGPT_MCP_CONFIG=/ABSOLUTE/PATH/config.local.json \
   node /ABSOLUTE/PATH/chatgpt-mcp/dist/src/stdio.js
 ```
 
-It should wait for MCP input. Any status/debug output belongs on stderr; stdout is protocol-only.
+It should wait for MCP input. Status/debug output belongs on stderr; stdout is protocol-only.
 
-For interactive protocol inspection:
+For interactive inspection:
 
 ```sh
 npx @modelcontextprotocol/inspector \
@@ -223,14 +271,4 @@ npx @modelcontextprotocol/inspector \
 
 ### HTTP returns 403
 
-The server validates `Host` and `Origin`. With a normal same-machine tunnel, use `127.0.0.1`. For intentional non-loopback serving, configure `http.allowedHosts` and, when browser Origins are expected, `http.allowedOrigins`.
-
-## Why stdio is the default recommendation here
-
-For one computer, stdio removes one local network boundary entirely:
-
-```text
-ChatGPT -> Secure MCP Tunnel -> tunnel-client -> spawned chatgpt-mcp process
-```
-
-HTTP remains useful when multiple local processes need to reach one persistent MCP endpoint or when `tunnel-client` runs on another machine in the same private network.
+The server validates `Host` and `Origin`. With a same-machine tunnel, use `127.0.0.1`. For intentional non-loopback serving, configure `http.allowedHosts` and, when browser Origins are expected, `http.allowedOrigins`.
