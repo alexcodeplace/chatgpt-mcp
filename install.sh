@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 PROFILE_NAME="${CHATGPT_MCP_PROFILE:-chatgpt-computer}"
 SERVICE_NAME="chatgpt-mcp-tunnel.service"
+PNPM_VERSION="11.20.0"
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SECRETS_DIR="$REPO/.secrets"
 TUNNEL_FILE="$SECRETS_DIR/tunnel-id"
@@ -36,9 +37,6 @@ The installer asks for both values if they are not already supplied through:
   CONTROL_PLANE_TUNNEL_ID
   CONTROL_PLANE_API_KEY
 
-It stores them locally under .secrets/ with restrictive permissions and never
-prints the values.
-
 Options:
   --yes         accept the broad-control configuration without prompting
   --no-desktop  do not attempt to install xdotool/xdg-utils/screenshot helpers
@@ -67,8 +65,7 @@ read_secret_file() {
   local file="$1" line value
   [[ -r "$file" ]] || return 1
   line="$(grep -m1 -vE '^[[:space:]]*(#|$)' "$file" 2>/dev/null || true)"
-  line="${line%$'\r'}"
-  line="$(trim "$line")"
+  line="$(trim "${line%$'\r'}")"
   [[ -n "$line" ]] || return 1
   [[ "$line" == export\ * ]] && line="${line#export }"
   if [[ "$line" == *=* ]]; then value="${line#*=}"; else value="$line"; fi
@@ -94,25 +91,17 @@ load_credentials() {
 
   local tunnel_id="${CONTROL_PLANE_TUNNEL_ID:-}"
   local api_key="${CONTROL_PLANE_API_KEY:-}"
+  local legacy
 
-  if [[ -z "$tunnel_id" && -r "$TUNNEL_FILE" ]]; then
-    tunnel_id="$(read_secret_file "$TUNNEL_FILE" || true)"
-  fi
-  if [[ -z "$api_key" && -r "$API_FILE" ]]; then
-    api_key="$(read_secret_file "$API_FILE" || true)"
-  fi
+  [[ -n "$tunnel_id" ]] || tunnel_id="$(read_secret_file "$TUNNEL_FILE" 2>/dev/null || true)"
+  [[ -n "$api_key" ]] || api_key="$(read_secret_file "$API_FILE" 2>/dev/null || true)"
 
-  # Compatibility with the first local activation package.
-  if [[ -z "$tunnel_id" && -r "$SECRETS_DIR/chatgpt-mcp.tunnel" ]]; then
-    tunnel_id="$(read_secret_file "$SECRETS_DIR/chatgpt-mcp.tunnel" || true)"
-  fi
+  # Compatibility with the original local activation package.
+  [[ -n "$tunnel_id" ]] || tunnel_id="$(read_secret_file "$SECRETS_DIR/chatgpt-mcp.tunnel" 2>/dev/null || true)"
   if [[ -z "$api_key" ]]; then
-    local legacy
     for legacy in "$SECRETS_DIR/chatgpt-mcp-tunnel.api" "$SECRETS_DIR/chatgpt-mtp-tunnel.api"; do
-      if [[ -r "$legacy" ]]; then
-        api_key="$(read_secret_file "$legacy" || true)"
-        [[ -n "$api_key" ]] && break
-      fi
+      api_key="$(read_secret_file "$legacy" 2>/dev/null || true)"
+      [[ -z "$api_key" ]] || break
     done
   fi
 
@@ -139,22 +128,13 @@ load_credentials() {
   export CONTROL_PLANE_API_KEY="$api_key"
 }
 
-ensure_git_ignores() {
-  if [[ -f "$REPO/.gitignore" ]]; then
-    grep -qxF '.secrets/' "$REPO/.gitignore" || printf '.secrets/\n' >> "$REPO/.gitignore"
-    grep -qxF 'config.local.json' "$REPO/.gitignore" || printf 'config.local.json\n' >> "$REPO/.gitignore"
-  fi
-}
-
 install_apt_packages() {
   (($#)) || return 0
   command -v apt-get >/dev/null 2>&1 || return 1
   if [[ $(id -u) -eq 0 ]]; then
-    apt-get update
-    apt-get install -y "$@"
+    apt-get update && apt-get install -y "$@"
   elif command -v sudo >/dev/null 2>&1; then
-    sudo apt-get update
-    sudo apt-get install -y "$@"
+    sudo apt-get update && sudo apt-get install -y "$@"
   else
     return 1
   fi
@@ -167,83 +147,83 @@ ensure_base_tools() {
   command -v python3 >/dev/null 2>&1 || missing+=(python3)
   if ((${#missing[@]})); then
     say "Installing installer prerequisites: ${missing[*]}"
-    install_apt_packages "${missing[@]}" || die "Missing ${missing[*]}. Install them and rerun ./install.sh."
+    install_apt_packages "${missing[@]}" || die "Install these prerequisites and rerun: ${missing[*]}"
   fi
+}
+
+select_pnpm() {
+  if command -v corepack >/dev/null 2>&1 && corepack "pnpm@$PNPM_VERSION" --version >/dev/null 2>&1; then
+    PNPM_CMD=(corepack "pnpm@$PNPM_VERSION")
+    return
+  fi
+  if command -v npx >/dev/null 2>&1; then
+    PNPM_CMD=(npx -y "pnpm@$PNPM_VERSION")
+    return
+  fi
+  die "Need Corepack or npx to run pnpm $PNPM_VERSION."
 }
 
 install_tunnel_client() {
   if command -v tunnel-client >/dev/null 2>&1; then
     TUNNEL_CLIENT="$(command -v tunnel-client)"
-    return 0
+    return
   fi
 
   ensure_base_tools
-  local os arch target tmp metadata asset_url checksum_url archive found companion
+  local os arch target tmp metadata asset_url checksum_url archive found companion checksum_line
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   case "$(uname -m)" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;
     *) die "Unsupported architecture for automatic tunnel-client install: $(uname -m)" ;;
   esac
-  [[ "$os" == linux ]] || die "Automatic tunnel-client install currently supports Linux only. Download it from https://github.com/openai/tunnel-client/releases/latest"
+  [[ "$os" == linux ]] || die "Automatic tunnel-client install supports Linux only. Download it from https://github.com/openai/tunnel-client/releases/latest"
   target="$os-$arch.zip"
 
   say "Installing the latest official OpenAI tunnel-client"
   tmp="$(mktemp -d)"
   metadata="$tmp/release.json"
-  curl -fsSL -H 'Accept: application/vnd.github+json' \
-    https://api.github.com/repos/openai/tunnel-client/releases/latest \
-    -o "$metadata" || die "Could not query the official tunnel-client release. Download it from https://github.com/openai/tunnel-client/releases/latest"
+  curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/openai/tunnel-client/releases/latest -o "$metadata" \
+    || die "Could not query the official tunnel-client release."
 
   asset_url="$(python3 - "$metadata" "$target" <<'PY'
 import json, sys
-path, target = sys.argv[1], sys.argv[2]
-with open(path, encoding='utf-8') as f:
-    release = json.load(f)
+release=json.load(open(sys.argv[1], encoding='utf-8'))
+target=sys.argv[2]
 for asset in release.get('assets', []):
-    name = asset.get('name', '')
-    if name == target or name.endswith('-' + target):
-        print(asset.get('browser_download_url', ''))
-        break
+    name=asset.get('name','')
+    if name == target or name.endswith('-'+target):
+        print(asset.get('browser_download_url','')); break
 PY
 )"
   checksum_url="$(python3 - "$metadata" <<'PY'
 import json, sys
-with open(sys.argv[1], encoding='utf-8') as f:
-    release = json.load(f)
+release=json.load(open(sys.argv[1], encoding='utf-8'))
 for asset in release.get('assets', []):
     if asset.get('name') == 'SHA256SUMS.txt':
-        print(asset.get('browser_download_url', ''))
-        break
+        print(asset.get('browser_download_url','')); break
 PY
 )"
-  [[ -n "$asset_url" ]] || die "Latest release has no $target archive. Download tunnel-client manually from https://github.com/openai/tunnel-client/releases/latest"
+  [[ -n "$asset_url" ]] || die "Latest tunnel-client release has no $target archive."
 
   archive="$tmp/$target"
   curl -fL "$asset_url" -o "$archive"
   if [[ -n "$checksum_url" ]] && command -v sha256sum >/dev/null 2>&1; then
     curl -fsSL "$checksum_url" -o "$tmp/SHA256SUMS.txt"
-    local checksum_line
     checksum_line="$(grep -E "[[:space:]]+\*?$target$" "$tmp/SHA256SUMS.txt" | head -n1 || true)"
-    [[ -n "$checksum_line" ]] || die "Official SHA256SUMS.txt did not contain $target."
+    [[ -n "$checksum_line" ]] || die "Official checksum file did not contain $target."
     (cd "$tmp" && printf '%s\n' "$checksum_line" | sha256sum -c -)
   fi
 
   unzip -q "$archive" -d "$tmp/unpacked"
   found="$(find "$tmp/unpacked" -type f -name tunnel-client -print -quit)"
   [[ -n "$found" ]] || die "Downloaded archive did not contain tunnel-client."
-
   mkdir -p "$USER_BIN"
   install -m 0755 "$found" "$USER_BIN/tunnel-client"
   companion="$(find "$tmp/unpacked" -type f -name cloudflared -print -quit)"
-  if [[ -n "$companion" ]]; then
-    install -m 0755 "$companion" "$USER_BIN/cloudflared"
-  fi
-  rm -rf "$tmp"
-
+  [[ -z "$companion" ]] || install -m 0755 "$companion" "$USER_BIN/cloudflared"
   TUNNEL_CLIENT="$USER_BIN/tunnel-client"
   export PATH="$USER_BIN:$PATH"
-  "$TUNNEL_CLIENT" --version || "$TUNNEL_CLIENT" help quickstart >/dev/null
 }
 
 install_desktop_packages() {
@@ -251,69 +231,31 @@ install_desktop_packages() {
   local need=()
   command -v xdotool >/dev/null 2>&1 || need+=(xdotool)
   command -v xdg-open >/dev/null 2>&1 || need+=(xdg-utils)
-  if ! command -v grim >/dev/null 2>&1 \
-    && ! command -v gnome-screenshot >/dev/null 2>&1 \
-    && ! command -v scrot >/dev/null 2>&1 \
-    && ! command -v import >/dev/null 2>&1; then
+  if ! command -v grim >/dev/null 2>&1 && ! command -v gnome-screenshot >/dev/null 2>&1 \
+    && ! command -v scrot >/dev/null 2>&1 && ! command -v import >/dev/null 2>&1; then
     need+=(scrot)
   fi
   ((${#need[@]})) || return 0
   say "Installing optional desktop helpers: ${need[*]}"
-  install_apt_packages "${need[@]}" || warn "Could not auto-install desktop helpers (${need[*]}). Core MCP/tunnel setup will continue."
-}
-
-write_full_config() {
-  [[ -f "$FULL_CONFIG" ]] || die "Missing $FULL_CONFIG"
-  if [[ -f "$LOCAL_CONFIG" ]]; then
-    cp -p "$LOCAL_CONFIG" "$SECRETS_DIR/config.local.json.backup.$(date +%Y%m%d-%H%M%S)"
-  fi
-  cp "$FULL_CONFIG" "$LOCAL_CONFIG"
-  chmod 600 "$LOCAL_CONFIG"
+  install_apt_packages "${need[@]}" || warn "Could not auto-install desktop helpers; core MCP/tunnel setup will continue."
 }
 
 write_launcher() {
-  local runtime_path="$1"
   mkdir -p "$USER_LIB"
-  cat > "$USER_LIB/run-tunnel.sh" <<LAUNCHER
+  cat > "$USER_LIB/run-tunnel.sh" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-REPO=$(printf '%q' "$REPO")
-API_FILE=$(printf '%q' "$API_FILE")
-TUNNEL_CLIENT=$(printf '%q' "$TUNNEL_CLIENT")
-PROFILE_NAME=$(printf '%q' "$PROFILE_NAME")
-PROFILE_DIR=$(printf '%q' "$PROFILE_DIR")
-
-trim() {
-  local value="\$1"
-  value="\${value#"\${value%%[![:space:]]*}"}"
-  value="\${value%"\${value##*[![:space:]]}"}"
-  printf '%s' "\$value"
-}
-read_secret() {
-  local line value
-  line="\$(grep -m1 -vE '^[[:space:]]*(#|$)' "\$1" 2>/dev/null || true)"
-  line="\$(trim "\${line%\$'\\r'}")"
-  [[ -n "\$line" ]] || { echo 'runtime API key file is empty' >&2; exit 1; }
-  [[ "\$line" == export\\ * ]] && line="\${line#export }"
-  if [[ "\$line" == *=* ]]; then value="\${line#*=}"; else value="\$line"; fi
-  value="\$(trim "\$value")"
-  if [[ \${#value} -ge 2 ]]; then
-    if [[ "\${value:0:1}" == '"' && "\${value: -1}" == '"' ]]; then value="\${value:1:\${#value}-2}"; fi
-    if [[ "\${value:0:1}" == "'" && "\${value: -1}" == "'" ]]; then value="\${value:1:\${#value}-2}"; fi
-  fi
-  [[ -n "\$value" ]] || { echo 'runtime API key file is empty' >&2; exit 1; }
-  printf '%s' "\$value"
-}
-
-export CONTROL_PLANE_API_KEY="\$(read_secret "\$API_FILE")"
-export CHATGPT_MCP_CONFIG="\$REPO/config.local.json"
-export TUNNEL_CLIENT_PROFILE_DIR="\$PROFILE_DIR"
-export PATH=$(printf '%q' "$runtime_path")
-
-if [[ -z "\${DISPLAY:-}" && -S /tmp/.X11-unix/X0 ]]; then export DISPLAY=:0; fi
-if [[ -z "\${XAUTHORITY:-}" && -f "\$HOME/.Xauthority" ]]; then export XAUTHORITY="\$HOME/.Xauthority"; fi
-
-exec "\$TUNNEL_CLIENT" run --profile "\$PROFILE_NAME"
+: "${CHATGPT_MCP_REPO:?CHATGPT_MCP_REPO is required}"
+: "${TUNNEL_CLIENT_BIN:?TUNNEL_CLIENT_BIN is required}"
+: "${CHATGPT_MCP_PROFILE:?CHATGPT_MCP_PROFILE is required}"
+API_FILE="$CHATGPT_MCP_REPO/.secrets/runtime-api-key"
+[[ -r "$API_FILE" ]] || { echo "Missing runtime API key: $API_FILE" >&2; exit 1; }
+export CONTROL_PLANE_API_KEY="$(head -n1 "$API_FILE" | tr -d '\r\n')"
+export CHATGPT_MCP_CONFIG="$CHATGPT_MCP_REPO/config.local.json"
+export HEALTH_LISTEN_ADDR="127.0.0.1:0"
+if [[ -z "${DISPLAY:-}" && -S /tmp/.X11-unix/X0 ]]; then export DISPLAY=:0; fi
+if [[ -z "${XAUTHORITY:-}" && -f "$HOME/.Xauthority" ]]; then export XAUTHORITY="$HOME/.Xauthority"; fi
+exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
 LAUNCHER
   chmod 700 "$USER_LIB/run-tunnel.sh"
 }
@@ -329,6 +271,10 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO
+Environment=CHATGPT_MCP_REPO=$REPO
+Environment=TUNNEL_CLIENT_BIN=$TUNNEL_CLIENT
+Environment=CHATGPT_MCP_PROFILE=$PROFILE_NAME
+Environment=TUNNEL_CLIENT_PROFILE_DIR=$PROFILE_DIR
 ExecStart=$USER_LIB/run-tunnel.sh
 Restart=always
 RestartSec=5
@@ -339,63 +285,41 @@ SERVICE
 }
 
 main() {
-  [[ "$(uname -s)" == Linux ]] || die "The current LocalComputerAdapter and this installer target Linux."
+  [[ "$(uname -s)" == Linux ]] || die "This installer currently targets Linux."
   [[ -f "$REPO/package.json" && -f "$REPO/src/stdio.ts" ]] || die "Run this script from a chatgpt-mcp checkout."
 
   say "chatgpt-mcp one-command installer"
   info "Repository: $REPO"
-  printf '\nThis installer enables broad owner-controlled access by default:\n'
-  printf '  filesystem read/write: /\n'
-  printf '  shell executables:     *\n'
-  printf '  process list/kill:     enabled\n'
-  printf '  systemd services:      enabled\n'
-  printf '  browser/screenshot/input: enabled when host tools support them\n'
+  printf '\nThis installer enables broad owner-controlled access by default.\n'
   if ! $ASSUME_YES; then
     [[ -t 0 ]] || die "Non-interactive install requires --yes."
-    printf '\nType YES to continue: '
+    printf 'Type YES to continue: '
     local answer
     IFS= read -r answer
     [[ "$answer" == YES ]] || die "Installation cancelled."
   fi
 
-  ensure_git_ignores
+  mkdir -p "$SECRETS_DIR"; chmod 700 "$SECRETS_DIR"
   load_credentials
-
-  command -v node >/dev/null 2>&1 || die "Node.js 22+ is required. Install Node 22 or newer and rerun."
+  command -v node >/dev/null 2>&1 || die "Node.js 22+ is required."
   local node_major
   node_major="$(node -p 'Number(process.versions.node.split(`.`)[0])')"
   (( node_major >= 22 )) || die "Node.js 22+ is required; found $(node --version)."
-
-  local -a pnpm_cmd=()
-  if command -v corepack >/dev/null 2>&1; then
-    # Do not run `corepack enable`: distro Corepack packages often cannot write
-    # their shim into /usr/bin as a normal user. Invoke pnpm through Corepack.
-    if corepack pnpm --version >/dev/null 2>&1; then
-      pnpm_cmd=(corepack pnpm)
-    elif corepack prepare pnpm@9.7.0 --activate >/dev/null 2>&1 \
-      && corepack pnpm --version >/dev/null 2>&1; then
-      pnpm_cmd=(corepack pnpm)
-    fi
-  fi
-  if ((${#pnpm_cmd[@]} == 0)); then
-    if command -v npx >/dev/null 2>&1; then
-      pnpm_cmd=(npx -y pnpm@9.7.0)
-    else
-      die "Need working Corepack or npx to run pnpm 9.7.0."
-    fi
-  fi
-
+  select_pnpm
   install_tunnel_client
   command -v systemctl >/dev/null 2>&1 || die "systemd/systemctl is required for the persistent user service."
   systemctl --user show-environment >/dev/null 2>&1 || die "A working systemd user session is required."
 
-  say "Installing dependencies and running the full gate"
+  say "Installing dependencies and running the full gate with pnpm $PNPM_VERSION"
   cd "$REPO"
-  "${pnpm_cmd[@]}" install --frozen-lockfile
-  "${pnpm_cmd[@]}" gate
+  "${PNPM_CMD[@]}" install --no-frozen-lockfile
+  "${PNPM_CMD[@]}" gate
 
   say "Writing broad local capability configuration"
-  write_full_config
+  [[ -f "$FULL_CONFIG" ]] || die "Missing $FULL_CONFIG"
+  [[ ! -f "$LOCAL_CONFIG" ]] || cp -p "$LOCAL_CONFIG" "$SECRETS_DIR/config.local.json.backup.$(date +%Y%m%d-%H%M%S)"
+  cp "$FULL_CONFIG" "$LOCAL_CONFIG"
+  chmod 600 "$LOCAL_CONFIG"
   install_desktop_packages
 
   say "Checking the MCP stdio entrypoint"
@@ -412,13 +336,11 @@ main() {
   rm -f "$SECRETS_DIR/stdio-check.err"
 
   say "Creating tunnel-client profile '$PROFILE_NAME'"
-  mkdir -p "$PROFILE_DIR"
-  chmod 700 "$PROFILE_DIR"
-  if [[ -f "$PROFILE_FILE" ]]; then
-    mv "$PROFILE_FILE" "$PROFILE_FILE.backup.$(date +%Y%m%d-%H%M%S)"
-  fi
+  mkdir -p "$PROFILE_DIR"; chmod 700 "$PROFILE_DIR"
+  [[ ! -f "$PROFILE_FILE" ]] || mv "$PROFILE_FILE" "$PROFILE_FILE.backup.$(date +%Y%m%d-%H%M%S)"
   export CHATGPT_MCP_CONFIG="$LOCAL_CONFIG"
   export TUNNEL_CLIENT_PROFILE_DIR="$PROFILE_DIR"
+  export HEALTH_LISTEN_ADDR="127.0.0.1:0"
   "$TUNNEL_CLIENT" init \
     --sample sample_mcp_stdio_local \
     --profile "$PROFILE_NAME" \
@@ -429,8 +351,7 @@ main() {
   "$TUNNEL_CLIENT" doctor --profile "$PROFILE_NAME" --explain
 
   say "Installing persistent systemd user service"
-  local runtime_path="$USER_BIN:$PATH"
-  write_launcher "$runtime_path"
+  write_launcher
   write_service
   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR XDG_SESSION_TYPE 2>/dev/null || true
   systemctl --user daemon-reload
@@ -444,25 +365,16 @@ main() {
   say "Final verification"
   "$TUNNEL_CLIENT" doctor --profile "$PROFILE_NAME" --explain
 
-  local screenshot_backend=unavailable
-  if command -v grim >/dev/null 2>&1; then screenshot_backend=grim
-  elif command -v gnome-screenshot >/dev/null 2>&1; then screenshot_backend=gnome-screenshot
-  elif command -v scrot >/dev/null 2>&1; then screenshot_backend=scrot
-  elif command -v import >/dev/null 2>&1; then screenshot_backend=import
-  fi
-
   printf '\n============================================================\n'
   printf 'LOCAL SETUP COMPLETE\n'
   printf '============================================================\n'
-  printf 'Profile:          %s\n' "$PROFILE_NAME"
-  printf 'Tunnel service:   ACTIVE\n'
-  printf 'Screen capture:   %s\n' "$screenshot_backend"
-  printf 'Desktop input:    %s (session=%s)\n' "$(command -v xdotool >/dev/null 2>&1 && echo enabled || echo unavailable)" "${XDG_SESSION_TYPE:-unknown}"
+  printf 'Profile:        %s\n' "$PROFILE_NAME"
+  printf 'Tunnel service: ACTIVE\n'
   printf '\nRemaining ChatGPT steps:\n'
   printf '  1. Enable ChatGPT Developer mode.\n'
   printf '  2. Open https://chatgpt.com/plugins\n'
-  printf '  3. Click +, create a developer-mode app, choose Connection = Tunnel.\n'
-  printf '  4. Select this tunnel, enable the app in a chat, and call system.info.\n'
+  printf '  3. Create a developer-mode app with Connection = Tunnel.\n'
+  printf '  4. Select this tunnel, enable the app, and call system.info.\n'
   printf '\nCheck later with: ./scripts/tunnel-status.sh\n'
 }
 
