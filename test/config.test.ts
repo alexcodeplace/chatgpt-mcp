@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { loadConfig, parseConfig } from '../src/config.js';
 
-test('safe defaults expose no filesystem, shell, or process authority', () => {
+test('safe defaults expose no action capability authority', () => {
   const config = parseConfig({});
   assert.equal(config.http.host, '127.0.0.1');
   assert.equal(config.http.port, 3210);
@@ -18,15 +18,33 @@ test('safe defaults expose no filesystem, shell, or process authority', () => {
   assert.deepEqual(config.shell.allowedCommands, []);
   assert.equal(config.process.list, false);
   assert.equal(config.process.kill, false);
+  assert.equal(config.service.enabled, false);
+  assert.deepEqual(config.service.allowedServices, []);
+  assert.equal(config.application.enabled, false);
+  assert.deepEqual(config.application.applications, {});
+  assert.equal(config.browser.enabled, false);
+  assert.deepEqual(config.browser.allowedSchemes, ['http', 'https']);
+  assert.equal(config.desktop.screenCapture, false);
+  assert.equal(config.desktop.input, false);
 });
 
 test('parsed configuration is deeply frozen', () => {
-  const config = parseConfig({ filesystem: { roots: ['/tmp'] }, shell: { allowedCommands: ['node'] } });
+  const config = parseConfig({
+    filesystem: { roots: ['/tmp'] },
+    shell: { allowedCommands: ['node'] },
+    service: { allowedServices: ['nginx'] },
+    application: { applications: { editor: { command: 'editor', args: ['--new-window'] } } },
+  });
   assert.equal(Object.isFrozen(config), true);
   assert.equal(Object.isFrozen(config.http), true);
   assert.equal(Object.isFrozen(config.filesystem), true);
   assert.equal(Object.isFrozen(config.filesystem.roots), true);
   assert.equal(Object.isFrozen(config.shell.allowedCommands), true);
+  assert.equal(Object.isFrozen(config.service.allowedServices), true);
+  assert.equal(Object.isFrozen(config.application.applications), true);
+  assert.equal(Object.isFrozen(config.application.applications.editor), true);
+  assert.equal(Object.isFrozen(config.application.applications.editor?.args), true);
+  assert.equal(Object.isFrozen(config.browser.allowedSchemes), true);
 });
 
 test('environment overrides file transport settings', async () => {
@@ -50,7 +68,14 @@ test('environment overrides file transport settings', async () => {
   }
 });
 
+test('normalization lowercases browser schemes', () => {
+  const config = parseConfig({ browser: { allowedSchemes: ['HTTPS', 'Custom+Thing'] } });
+  assert.deepEqual(config.browser.allowedSchemes, ['https', 'custom+thing']);
+});
+
 test('malformed configuration fails closed', () => {
   assert.throws(() => parseConfig({ shell: { enabled: true, maxRuntimeMs: -1 } }));
   assert.throws(() => parseConfig({ http: { port: 70000 } }));
+  assert.throws(() => parseConfig({ browser: { allowedSchemes: ['not a scheme'] } }));
+  assert.throws(() => parseConfig({ application: { maxTracked: 0 } }));
 });
