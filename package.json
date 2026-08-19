@@ -5,12 +5,12 @@
   "type": "module",
   "description": "Stateless MCP server exposing explicitly configured computer capabilities to ChatGPT.",
   "engines": { "node": ">=22" },
-  "packageManager": "pnpm@9.7.0",
+  "packageManager": "pnpm@11.20.0",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
-    "gate": "pnpm typecheck && pnpm test && pnpm build",
+    "gate": "tsc -p tsconfig.json --noEmit && tsx --test test/**/*.test.ts && tsc -p tsconfig.json",
     "start:http": "node dist/src/http.js",
     "start:stdio": "node dist/src/stdio.js",
     "dev:http": "tsx src/http.ts"
