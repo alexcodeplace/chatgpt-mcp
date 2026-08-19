@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
@@ -195,15 +195,6 @@ function isAllowed(value: string, allowList: readonly string[]): boolean {
   return allowList.includes('*') || allowList.includes(value);
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
 function validateCoordinates(x: number, y: number, operation: string): void {
   if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0) {
     throw adapterError('INVALID_INPUT', operation, 'Coordinates must be non-negative integers.', { x, y });
@@ -211,7 +202,7 @@ function validateCoordinates(x: number, y: number, operation: string): void {
 }
 
 export class LocalComputerAdapter implements ComputerAdapter {
-  private readonly applications = new Map<string, number>();
+  private readonly applications = new Map<string, ChildProcess>();
 
   constructor(private readonly config: Readonly<ChatGptMcpConfig>) {}
 
@@ -367,12 +358,18 @@ export class LocalComputerAdapter implements ComputerAdapter {
       if (result.exitCode !== 0) {
         throw adapterError('OS_ERROR', operation, 'Process listing command failed.', { exitCode: result.exitCode });
       }
-      return result.stdout.split('\n').flatMap(line => {
+      const processes: ProcessInfo[] = [];
+      for (const line of result.stdout.split('\n')) {
         const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
-        if (!match) return [];
-        const [, pid, parentPid, user, command] = match;
-        return [{ pid: Number(pid), parentPid: Number(parentPid), user, command } satisfies ProcessInfo];
-      });
+        if (match === null) continue;
+        const pid = match[1];
+        const parentPid = match[2];
+        const user = match[3];
+        const command = match[4];
+        if (pid === undefined || parentPid === undefined || user === undefined || command === undefined) continue;
+        processes.push({ pid: Number(pid), parentPid: Number(parentPid), user, command });
+      }
+      return processes;
     } catch (error) {
       mapOsError(error, operation);
     }
@@ -439,8 +436,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
   }
 
   private pruneApplications(): void {
-    for (const [handle, pid] of this.applications) {
-      if (!isProcessAlive(pid)) this.applications.delete(handle);
+    for (const [handle, child] of this.applications) {
+      if (child.exitCode !== null || child.signalCode !== null) this.applications.delete(handle);
     }
   }
 
@@ -472,14 +469,14 @@ export class LocalComputerAdapter implements ComputerAdapter {
         stdio: 'ignore',
       });
       await new Promise<void>((resolve, reject) => {
-        child.once('spawn', () => resolve());
+        child.once('spawn', resolve);
         child.once('error', reject);
       });
       if (child.pid === undefined) throw adapterError('OS_ERROR', operation, 'Application started without a process id.', { name });
       const pid = child.pid;
       child.unref();
       const handle = `app_${randomUUID().replaceAll('-', '')}`;
-      this.applications.set(handle, pid);
+      this.applications.set(handle, child);
       return { handle, pid };
     } catch (error) {
       mapOsError(error, operation, { name });
@@ -489,14 +486,21 @@ export class LocalComputerAdapter implements ComputerAdapter {
   async closeApplication(handle: string): Promise<void> {
     const operation = 'app.close';
     requireCapability(this.config.application.enabled, operation, 'Application closing is disabled.');
-    const pid = this.applications.get(handle);
-    if (pid === undefined) throw adapterError('NOT_FOUND', operation, 'Application handle is unknown or expired.', { handle });
+    const child = this.applications.get(handle);
+    if (child === undefined) throw adapterError('NOT_FOUND', operation, 'Application handle is unknown or expired.', { handle });
+    this.applications.delete(handle);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw adapterError('NOT_FOUND', operation, 'Application has already exited.', { handle, pid: child.pid });
+    }
     try {
-      process.kill(pid, 'SIGTERM');
-      this.applications.delete(handle);
+      if (!child.kill('SIGTERM')) {
+        throw adapterError('OS_ERROR', operation, 'Operating system did not accept the application termination signal.', {
+          handle,
+          pid: child.pid,
+        });
+      }
     } catch (error) {
-      this.applications.delete(handle);
-      mapOsError(error, operation, { handle, pid });
+      mapOsError(error, operation, { handle, pid: child.pid });
     }
   }
 
