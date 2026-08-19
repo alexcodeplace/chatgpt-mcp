@@ -20,7 +20,7 @@ Architecture: [`SPEC.md`](./SPEC.md). Delivery history: [`PLAN.md`](./PLAN.md). 
 
 ## Capabilities
 
-Every family except `system.info` is opt-in. Disabled capability families are omitted from MCP tool discovery where practical.
+Every family except `system.info` is opt-in. Disabled capability families are omitted from MCP tool discovery where practical. Desktop-facing capabilities also require the master `desktop.hostDisplayAccess` grant.
 
 | Tool | Purpose |
 | --- | --- |
@@ -39,9 +39,9 @@ Every family except `system.info` is opt-in. Disabled capability families are om
 | `app.launch` | Launch a configured named application |
 | `app.close` | Close an application previously launched through its handle |
 | `browser.open` | Open an allowed URL scheme |
-| `screen.capture` | Capture the desktop as a PNG MCP image |
-| `input.move` | Move the desktop pointer |
-| `input.click` | Click the desktop pointer |
+| `screen.capture` | Capture the desktop as a PNG MCP image; requires `desktop.hostDisplayAccess` |
+| `input.move` | Move the desktop pointer; requires `desktop.hostDisplayAccess` |
+| `input.click` | Click the desktop pointer; requires `desktop.hostDisplayAccess` |
 | `input.type` | Type literal text into the focused application |
 | `input.key` | Send a key sequence to the focused application |
 
@@ -83,7 +83,7 @@ chatgpt-mcp
 
 No public inbound listener is required.
 
-The quick installer intentionally uses [`config.full.example.json`](./config.full.example.json), which grants broad owner-controlled access: filesystem read/write from `/`, wildcard executable access, process/service control, browser opening, screenshots, and desktop input where supported. If you want narrower authority, use `config.example.json` and the manual setup instead.
+The quick installer intentionally uses [`config.full.example.json`](./config.full.example.json), which grants broad owner-controlled access: filesystem read/write from `/`, wildcard executable access, process/service control, browser opening, host-display access, screenshots, and desktop input where supported. If you want narrower authority, use `config.example.json` and the manual setup instead.
 
 ## 1. Create an OpenAI MCP tunnel
 
@@ -218,6 +218,8 @@ export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
 
 The default configuration exposes only `system.info`. See [`config.example.json`](./config.example.json) for every capability family. `config.local.json` and `.secrets/` are gitignored.
 
+`desktop.hostDisplayAccess` is a master grant for access to the workstation's graphical session. When false, `screen.capture`, desktop input, application launching, and browser opening are omitted even if their subordinate flags are true. `shell.exec` children also have `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, and `DBUS_SESSION_BUS_ADDRESS` removed, and callers cannot add those variables back through the tool's `env` parameter.
+
 For intentionally broad authority, copy [`config.full.example.json`](./config.full.example.json) instead.
 
 ## Start over stdio
@@ -256,7 +258,9 @@ HTTP remains stateless. A non-loopback bind is rejected unless allowed hosts are
 - `shell.exec` uses direct executable + argument-array spawning with no implicit `sh -c`.
 - Services and applications are checked against configured authority before invocation.
 - Browser schemes are validated before opening.
-- Desktop input and screenshots are separate opt-in capabilities with bounded inputs/outputs.
+- Host-display access is a separate master capability; desktop input/screenshots cannot execute unless it is granted.
+- With host-display access denied, shell children do not inherit the normal desktop/session environment and cannot re-add those variables through MCP input.
+- Desktop input and screenshots remain separate subordinate opt-in capabilities with bounded inputs/outputs.
 
 See [`SPEC.md`](./SPEC.md) for the full contracts.
 
@@ -278,6 +282,7 @@ GitHub Actions runs the same gate on pushes and pull requests and syntax-checks 
 - `service.*` defaults to systemd's `systemctl`.
 - `input.*` uses `xdotool`; native Wayland may need XWayland or a future compositor-specific adapter.
 - `screen.capture` supports common Linux screenshot commands; desktop/session permissions still apply.
+- `hostDisplayAccess=false` prevents accidental/ordinary use of the host graphical session through the MCP surface, but wildcard `shell.exec` is still arbitrary same-user code execution rather than a hardened OS sandbox. Use VM/container/OS isolation for hostile workloads.
 - The automatic installer targets Linux amd64/arm64 and systemd user services.
 - External ChatGPT/tunnel smoke requires the operator's own OpenAI tunnel identity/runtime credentials; repository CI cannot impersonate them.
 

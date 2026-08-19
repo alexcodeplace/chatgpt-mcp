@@ -343,6 +343,8 @@ Example configuration shape:
 
 `allowedCommands: ["*"]` may be supported as an explicit owner choice.
 
+Desktop-facing authority has a master `desktop.hostDisplayAccess` boolean. `screen.capture`, desktop input, configured application launch, and configured browser opening require this master grant in addition to their own family flags. When it is denied, shell children must not inherit host graphical-session environment such as `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, or `DBUS_SESSION_BUS_ADDRESS`, and caller-provided environment input must not be allowed to reintroduce those values.
+
 No hard-coded interactive confirmation step is inserted after policy authorization. The permission boundary is the combination of ChatGPT/plugin permissions plus this server's configured capabilities.
 
 ## 9. Filesystem path rules
@@ -372,6 +374,7 @@ Requirements:
 - stdout/stderr are bounded to prevent unbounded memory use;
 - child termination on timeout is deterministic;
 - caller-provided environment entries are merged only when allowed by configuration;
+- when host-display access is denied, graphical-session environment is removed from child processes and attempts to provide it explicitly are rejected;
 - command result is returned even for non-zero exit status; infrastructure/policy failures use MCP tool errors.
 
 A later explicit `shell.execShell` capability may permit shell-string execution, but it must be separately configurable and must not be silently folded into `shell.exec`.

@@ -50,6 +50,7 @@ const browserSchema = z.object({
 });
 
 const desktopSchema = z.object({
+  hostDisplayAccess: z.boolean().default(false),
   screenCapture: z.boolean().default(false),
   input: z.boolean().default(false),
   screenBackend: z.enum(['auto', 'grim', 'gnome-screenshot', 'scrot', 'imagemagick-import']).default('auto'),
@@ -75,6 +76,7 @@ const configSchema = z.object({
   application: applicationSchema.default({ enabled: false, applications: {}, maxTracked: 64 }),
   browser: browserSchema.default({ enabled: false, command: 'xdg-open', allowedSchemes: ['http', 'https'], maxRuntimeMs: 30_000 }),
   desktop: desktopSchema.default({
+    hostDisplayAccess: false,
     screenCapture: false,
     input: false,
     screenBackend: 'auto',

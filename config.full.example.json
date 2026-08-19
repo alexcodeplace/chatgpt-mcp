@@ -52,6 +52,7 @@
     "maxRuntimeMs": 30000
   },
   "desktop": {
+    "hostDisplayAccess": true,
     "screenCapture": true,
     "input": true,
     "screenBackend": "auto",

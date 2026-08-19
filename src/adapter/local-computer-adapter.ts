@@ -31,6 +31,7 @@ const MAX_APPLICATION_ARG_BYTES = 64 * 1024;
 const MAX_URL_BYTES = 16 * 1024;
 const FORCE_KILL_DELAY_MS = 1_000;
 const INTERNAL_OUTPUT_LIMIT = 4 * 1024 * 1024;
+const HOST_DISPLAY_ENV_KEYS = new Set(['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'MIR_SOCKET', 'DBUS_SESSION_BUS_ADDRESS']);
 
 function requireCapability(enabled: boolean, operation: string, message: string): void {
   if (!enabled) throw adapterError('CAPABILITY_DISABLED', operation, message);
@@ -58,8 +59,21 @@ function mapOsError(error: unknown, operation: string, details?: Record<string, 
   });
 }
 
-function validateEnvironment(env: Readonly<Record<string, string>> | undefined, allowEnvironment: boolean): NodeJS.ProcessEnv | undefined {
-  if (env === undefined) return undefined;
+function sanitizeHostDisplayEnvironment(env: NodeJS.ProcessEnv, hostDisplayAccess: boolean): NodeJS.ProcessEnv {
+  if (hostDisplayAccess) return env;
+  const sanitized = { ...env };
+  for (const key of HOST_DISPLAY_ENV_KEYS) delete sanitized[key];
+  return sanitized;
+}
+
+function validateEnvironment(
+  env: Readonly<Record<string, string>> | undefined,
+  allowEnvironment: boolean,
+  hostDisplayAccess: boolean,
+): NodeJS.ProcessEnv | undefined {
+  if (env === undefined) {
+    return hostDisplayAccess ? undefined : sanitizeHostDisplayEnvironment({ ...process.env }, false);
+  }
   if (!allowEnvironment) {
     throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Caller-provided environment variables are disabled.');
   }
@@ -73,8 +87,11 @@ function validateEnvironment(env: Readonly<Record<string, string>> | undefined, 
     if (!ENV_KEY.test(key) || Buffer.byteLength(value, 'utf8') > MAX_ENV_VALUE_BYTES) {
       throw adapterError('INVALID_INPUT', 'shell.exec', 'Invalid caller-provided environment variable.', { key });
     }
+    if (!hostDisplayAccess && HOST_DISPLAY_ENV_KEYS.has(key)) {
+      throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Host display environment access is disabled.', { key });
+    }
   }
-  return { ...process.env, ...env };
+  return sanitizeHostDisplayEnvironment({ ...process.env, ...env }, hostDisplayAccess);
 }
 
 type CaptureOptions = {
@@ -174,11 +191,13 @@ async function requireSuccessfulCommand(
   args: readonly string[],
   operation: string,
   timeoutMs: number,
+  env?: NodeJS.ProcessEnv,
 ): Promise<ExecResult> {
   const result = await spawnBounded(command, args, {
     timeoutMs,
     maxOutputBytes: INTERNAL_OUTPUT_LIMIT,
     operation,
+    ...(env === undefined ? {} : { env }),
   });
   if (result.timedOut) throw adapterError('TIMEOUT', operation, 'Operating-system command timed out.', { command });
   if (result.exitCode !== 0) {
@@ -335,7 +354,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     if (request.cwd !== undefined) {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
-    const env = validateEnvironment(request.env, this.config.shell.allowEnvironment);
+    const env = validateEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
     return spawnBounded(request.command, request.args, {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
@@ -444,6 +463,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
   async launchApplication(name: string, args: readonly string[] = []): Promise<ApplicationLaunchResult> {
     const operation = 'app.launch';
     requireCapability(this.config.application.enabled, operation, 'Application launching is disabled.');
+    requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     const definition = this.config.application.applications[name];
     if (definition === undefined) {
       throw adapterError('COMMAND_NOT_ALLOWED', operation, 'Application is not configured.', { name });
@@ -467,6 +487,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
         detached: true,
         shell: false,
         stdio: 'ignore',
+        env: sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess),
       });
       await new Promise<void>((resolve, reject) => {
         child.once('spawn', resolve);
@@ -507,6 +528,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
   async openBrowser(rawUrl: string): Promise<void> {
     const operation = 'browser.open';
     requireCapability(this.config.browser.enabled, operation, 'Browser opening is disabled.');
+    requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     if (Buffer.byteLength(rawUrl, 'utf8') > MAX_URL_BYTES) {
       throw adapterError('INVALID_INPUT', operation, 'URL exceeds the implementation byte limit.');
     }
@@ -526,6 +548,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
         [url.toString()],
         operation,
         this.config.browser.maxRuntimeMs,
+        sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess),
       );
     } catch (error) {
       mapOsError(error, operation, { scheme });
@@ -534,6 +557,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
 
   async captureScreen(): Promise<ScreenCapture> {
     const operation = 'screen.capture';
+    requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.screenCapture, operation, 'Screen capture is disabled.');
     const dir = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-screen-'));
     const file = join(dir, 'screen.png');
@@ -584,6 +608,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
   }
 
   private async xdotool(args: readonly string[], operation: string): Promise<void> {
+    requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.input, operation, 'Desktop input is disabled.');
     try {
       await requireSuccessfulCommand('xdotool', args, operation, 30_000);

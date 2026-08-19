@@ -17,6 +17,7 @@ test('service allow-list rejects before invoking systemctl', async () => {
 test('unknown named applications are rejected', async () => {
   const adapter = new LocalComputerAdapter(parseConfig({
     application: { enabled: true, applications: {} },
+    desktop: { hostDisplayAccess: true },
   }));
   await assert.rejects(() => adapter.launchApplication('editor'), error => errorCode(error) === 'COMMAND_NOT_ALLOWED');
 });
@@ -29,6 +30,7 @@ test('application-specific caller arguments can be disabled', async () => {
         worker: { command: process.execPath, args: ['-e', 'process.exit(0)'], allowArguments: false },
       },
     },
+    desktop: { hostDisplayAccess: true },
   }));
   await assert.rejects(() => adapter.launchApplication('worker', ['extra']), error => errorCode(error) === 'COMMAND_NOT_ALLOWED');
 });
@@ -45,6 +47,7 @@ test('application launch returns an explicit handle that app.close accepts', asy
         },
       },
     },
+    desktop: { hostDisplayAccess: true },
   }));
 
   const launched = await adapter.launchApplication('worker');
@@ -57,6 +60,7 @@ test('application launch returns an explicit handle that app.close accepts', asy
 test('browser scheme policy rejects before invoking an opener', async () => {
   const adapter = new LocalComputerAdapter(parseConfig({
     browser: { enabled: true, allowedSchemes: ['https'] },
+    desktop: { hostDisplayAccess: true },
   }));
   await assert.rejects(() => adapter.openBrowser('file:///etc/passwd'), error => errorCode(error) === 'COMMAND_NOT_ALLOWED');
   await assert.rejects(() => adapter.openBrowser('not a url'), error => errorCode(error) === 'INVALID_INPUT');
@@ -73,7 +77,7 @@ test('desktop screen and input operations fail closed while disabled', async () 
 
 test('input validates coordinates and text before touching xdotool', async () => {
   const adapter = new LocalComputerAdapter(parseConfig({
-    desktop: { input: true, maxTextBytes: 4 },
+    desktop: { hostDisplayAccess: true, input: true, maxTextBytes: 4 },
   }));
   await assert.rejects(() => adapter.movePointer(-1, 0), error => errorCode(error) === 'INVALID_INPUT');
   await assert.rejects(() => adapter.clickPointer('left', 1), error => errorCode(error) === 'INVALID_INPUT');

@@ -73,7 +73,7 @@ export function registerTools(
         capabilities: z.object({
           filesystemRead: z.boolean(), filesystemWrite: z.boolean(), filesystemRoots: z.number().int(),
           shell: z.boolean(), processList: z.boolean(), processKill: z.boolean(), service: z.boolean(),
-          application: z.boolean(), browser: z.boolean(), screenCapture: z.boolean(), input: z.boolean(),
+          application: z.boolean(), browser: z.boolean(), hostDisplayAccess: z.boolean(), screenCapture: z.boolean(), input: z.boolean(),
         }),
       }),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -88,10 +88,11 @@ export function registerTools(
         processList: config.process.list,
         processKill: config.process.kill,
         service: config.service.enabled,
-        application: config.application.enabled,
-        browser: config.browser.enabled,
-        screenCapture: config.desktop.screenCapture,
-        input: config.desktop.input,
+        application: config.application.enabled && config.desktop.hostDisplayAccess,
+        browser: config.browser.enabled && config.desktop.hostDisplayAccess,
+        hostDisplayAccess: config.desktop.hostDisplayAccess,
+        screenCapture: config.desktop.hostDisplayAccess && config.desktop.screenCapture,
+        input: config.desktop.hostDisplayAccess && config.desktop.input,
       },
     })),
   );
@@ -279,7 +280,7 @@ export function registerTools(
     );
   }
 
-  if (config.application.enabled) {
+  if (config.application.enabled && config.desktop.hostDisplayAccess) {
     server.registerTool(
       'app.launch',
       {
@@ -308,7 +309,7 @@ export function registerTools(
     );
   }
 
-  if (config.browser.enabled) {
+  if (config.browser.enabled && config.desktop.hostDisplayAccess) {
     server.registerTool(
       'browser.open',
       {
@@ -325,7 +326,7 @@ export function registerTools(
     );
   }
 
-  if (config.desktop.screenCapture) {
+  if (config.desktop.hostDisplayAccess && config.desktop.screenCapture) {
     server.registerTool(
       'screen.capture',
       {
@@ -352,7 +353,7 @@ export function registerTools(
     );
   }
 
-  if (config.desktop.input) {
+  if (config.desktop.hostDisplayAccess && config.desktop.input) {
     server.registerTool(
       'input.move',
       {

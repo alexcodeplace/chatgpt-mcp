@@ -24,6 +24,7 @@ test('safe defaults expose no action capability authority', () => {
   assert.deepEqual(config.application.applications, {});
   assert.equal(config.browser.enabled, false);
   assert.deepEqual(config.browser.allowedSchemes, ['http', 'https']);
+  assert.equal(config.desktop.hostDisplayAccess, false);
   assert.equal(config.desktop.screenCapture, false);
   assert.equal(config.desktop.input, false);
 });
