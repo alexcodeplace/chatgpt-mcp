@@ -1,0 +1,176 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { LocalComputerAdapter } from '../src/adapter/local-computer-adapter.js';
+import { parseConfig } from '../src/config.js';
+
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-adapter-'));
+  const config = parseConfig({
+    filesystem: { read: true, write: true, roots: [root], maxReadBytes: 1024, maxWriteBytes: 1024 },
+    shell: { enabled: true, allowedCommands: ['node'], maxRuntimeMs: 2_000, maxOutputBytes: 1024, allowEnvironment: false },
+    process: { list: true, kill: true },
+  });
+  return { root, adapter: new LocalComputerAdapter(config) };
+}
+
+test('system info returns host-neutral fields', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const info = await adapter.systemInfo();
+    assert.ok(info.hostname.length > 0);
+    assert.ok(info.platform.length > 0);
+    assert.ok(info.architecture.length > 0);
+    assert.ok(info.uptimeSeconds >= 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('filesystem lifecycle stays inside configured root', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const directory = join(root, 'dir');
+    const first = join(directory, 'a.txt');
+    const moved = join(directory, 'b.txt');
+    await adapter.makeDirectory(directory, false);
+    await adapter.writeFile(first, 'one', 'create');
+    await adapter.writeFile(first, '+two', 'append');
+    assert.equal(await adapter.readFile(first), 'one+two');
+    const entries = await adapter.listDirectory(directory);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.name, 'a.txt');
+    assert.equal(entries[0]?.type, 'file');
+    await adapter.movePath(first, moved);
+    assert.equal(await readFile(moved, 'utf8'), 'one+two');
+    await adapter.deletePath(moved, false);
+    await adapter.deletePath(directory, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('filesystem read and write limits fail closed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-limits-'));
+  const config = parseConfig({
+    filesystem: { read: true, write: true, roots: [root], maxReadBytes: 4, maxWriteBytes: 4 },
+  });
+  const adapter = new LocalComputerAdapter(config);
+  try {
+    await assert.rejects(() => adapter.writeFile(join(root, 'large.txt'), '12345', 'create'), (error: unknown) => {
+      return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OUTPUT_LIMIT';
+    });
+    await adapter.writeFile(join(root, 'small.txt'), '1234', 'create');
+    await assert.rejects(() => adapter.readFile(join(root, 'small.txt'), 3), (error: unknown) => {
+      return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OUTPUT_LIMIT';
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('disabled filesystem capabilities reject adapter calls', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-disabled-'));
+  const adapter = new LocalComputerAdapter(parseConfig({ filesystem: { roots: [root] } }));
+  try {
+    await assert.rejects(() => adapter.listDirectory(root), (error: unknown) => {
+      return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CAPABILITY_DISABLED';
+    });
+    await assert.rejects(() => adapter.writeFile(join(root, 'x'), 'x', 'create'), (error: unknown) => {
+      return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CAPABILITY_DISABLED';
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shell exec returns stdout and non-zero exits as normal results', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const ok = await adapter.exec({ command: 'node', args: ['-e', 'process.stdout.write("ok")'], cwd: root });
+    assert.equal(ok.exitCode, 0);
+    assert.equal(ok.stdout, 'ok');
+    assert.equal(ok.timedOut, false);
+
+    const nonzero = await adapter.exec({ command: 'node', args: ['-e', 'process.exit(7)'], cwd: root });
+    assert.equal(nonzero.exitCode, 7);
+    assert.equal(nonzero.timedOut, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shell timeout terminates the child and reports timedOut', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const result = await adapter.exec({
+      command: 'node',
+      args: ['-e', 'setTimeout(() => {}, 10000)'],
+      cwd: root,
+      timeoutMs: 25,
+    });
+    assert.equal(result.timedOut, true);
+    assert.notEqual(result.exitCode, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shell output limit terminates execution with OUTPUT_LIMIT', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-output-'));
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { roots: [root] },
+    shell: { enabled: true, allowedCommands: ['node'], maxRuntimeMs: 2_000, maxOutputBytes: 32 },
+  }));
+  try {
+    await assert.rejects(
+      () => adapter.exec({ command: 'node', args: ['-e', 'process.stdout.write("x".repeat(1000))'], cwd: root }),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OUTPUT_LIMIT',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('caller environment is rejected unless explicitly enabled', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    await assert.rejects(
+      () => adapter.exec({ command: 'node', args: ['-e', ''], cwd: root, env: { TEST_VALUE: 'x' } }),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CAPABILITY_DISABLED',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('process listing includes the current test process', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const processes = await adapter.listProcesses();
+    assert.ok(processes.some(item => item.pid === process.pid));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('process kill terminates a disposable child', async () => {
+  const { root, adapter } = await fixture();
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { stdio: 'ignore' });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    assert.ok(child.pid);
+    await adapter.killProcess(child.pid!, 'SIGTERM');
+    await new Promise<void>(resolve => child.once('exit', () => resolve()));
+    assert.notEqual(child.exitCode, 0);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await rm(root, { recursive: true, force: true });
+  }
+});
