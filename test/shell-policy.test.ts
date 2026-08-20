@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { authorizeCommand, clampOutput, clampRuntime } from '../src/policy/shell.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampOutput, clampRuntime } from '../src/policy/shell.js';
 
 const policy = {
   enabled: true,
@@ -40,4 +40,51 @@ test('runtime and output values clamp to configured maxima', () => {
   assert.equal(clampOutput(undefined, 200), 200);
   assert.equal(clampOutput(1000, 200), 200);
   assert.equal(clampOutput(0, 200), 1);
+});
+
+
+test('host display denial blocks obvious direct capture executables', () => {
+  for (const command of ['grim', 'gnome-screenshot', 'scrot', 'maim', 'xwd', 'flameshot', 'spectacle', 'import']) {
+    assert.throws(() => authorizeHostDisplaySafeInvocation(command, [], false), (error: unknown) =>
+      typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED');
+  }
+});
+
+test('host display denial blocks obvious wrapped and multipurpose capture invocations', () => {
+  const cases: Array<[string, string[]]> = [
+    ['ffmpeg', ['-f', 'x11grab', '-i', ':0', 'out.png']],
+    ['gst-launch-1.0', ['ximagesrc', '!', 'pngenc', '!', 'filesink', 'location=out.png']],
+    ['bash', ['-lc', 'grim /tmp/shot.png']],
+    ['env', ['ffmpeg', '-f', 'x11grab', '-i', ':0', 'out.png']],
+    ['gdbus', ['call', '--dest', 'org.gnome.Shell.Screenshot']],
+    ['magick', ['import', '-window', 'root', 'shot.png']],
+  ];
+  for (const [command, args] of cases) {
+    assert.throws(() => authorizeHostDisplaySafeInvocation(command, args, false), (error: unknown) =>
+      typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED');
+  }
+});
+
+test('host display denial blocks obvious Python and JavaScript capture one-liners', () => {
+  const cases: Array<[string, string[]]> = [
+    ['python3', ['-c', 'import pyautogui; pyautogui.screenshot()']],
+    ['python3', ['-c', 'from PIL import ImageGrab; ImageGrab.grab()']],
+    ['python3', ['-c', 'import mss; mss.mss().grab({"top":0,"left":0,"width":100,"height":100})']],
+    ['node', ['-e', 'require("screenshot-desktop")().then(console.log)']],
+    ['node', ['-e', 'desktopCapturer.getSources({types:["screen"]})']],
+    ['python3', ['-c', 'from Xlib import display; d=display.Display(); d.screen().root.get_image(0,0,100,100,0xffffffff,2)']],
+    ['env', ['DISPLAY=:0', 'python3', '-c', 'print(1)']],
+  ];
+  for (const [command, args] of cases) {
+    assert.throws(() => authorizeHostDisplaySafeInvocation(command, args, false), (error: unknown) =>
+      typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED');
+  }
+});
+
+test('host display guard preserves ordinary shell, Python, Node, and ffmpeg work', () => {
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('python3', ['-c', 'print(1 + 1)'], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('node', ['-e', 'console.log(2)'], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', 'printf ok'], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('ffmpeg', ['-i', 'input.mp4', '-c:v', 'copy', 'output.mp4'], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('grim', [], true));
 });

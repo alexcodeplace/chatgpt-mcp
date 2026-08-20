@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
 import { authorizePath } from '../policy/filesystem.js';
-import { authorizeCommand, clampRuntime } from '../policy/shell.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime } from '../policy/shell.js';
 import type {
   ApplicationLaunchResult,
   ComputerAdapter,
@@ -350,6 +350,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
   async exec(request: ExecRequest): Promise<ExecResult> {
     const operation = 'shell.exec';
     authorizeCommand(request.command, this.config.shell);
+    authorizeHostDisplaySafeInvocation(request.command, request.args, this.config.desktop.hostDisplayAccess);
     let cwd: string | undefined;
     if (request.cwd !== undefined) {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);

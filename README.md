@@ -251,7 +251,7 @@ export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
 
 The default configuration exposes only `system.info`. See [`config.example.json`](./config.example.json) for every capability family. `config.local.json` and `.secrets/` are gitignored.
 
-`desktop.hostDisplayAccess` is a master grant for access to the workstation's graphical session. When false, `screen.capture`, desktop input, application launching, and browser opening are omitted even if their subordinate flags are true. `shell.exec` children also have `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, and `DBUS_SESSION_BUS_ADDRESS` removed, and callers cannot add those variables back through the tool's `env` parameter.
+`desktop.hostDisplayAccess` is a master grant for access to the workstation's graphical session. When false, `screen.capture`, desktop input, application launching, and browser opening are omitted even if their subordinate flags are true. `shell.exec` children also have `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, and `DBUS_SESSION_BUS_ADDRESS` removed, callers cannot add those variables back through the tool's `env` parameter, and a defense-in-depth guard rejects common screenshot executables plus high-signal FFmpeg/GStreamer/D-Bus/Python/JavaScript capture invocations.
 
 For intentionally broad authority, copy [`config.full.example.json`](./config.full.example.json) instead.
 
@@ -315,7 +315,8 @@ GitHub Actions runs the same gate on pushes and pull requests and syntax-checks 
 - `service.*` defaults to systemd's `systemctl`.
 - `input.*` uses `xdotool`; native Wayland may need XWayland or a future compositor-specific adapter.
 - `screen.capture` supports common Linux screenshot commands; desktop/session permissions still apply.
-- `hostDisplayAccess=false` prevents accidental/ordinary use of the host graphical session through the MCP surface, but wildcard `shell.exec` is still arbitrary same-user code execution rather than a hardened OS sandbox. Use VM/container/OS isolation for hostile workloads.
+- `hostDisplayAccess=false` also blocks common screenshot CLIs and obvious one-shot capture payloads (for example FFmpeg `x11grab`, GStreamer `ximagesrc`, screenshot D-Bus APIs, Python `pyautogui`/PIL/mss, and common Node/Electron capture APIs). This is a defense-in-depth denylist, not a security sandbox.
+- Wildcard `shell.exec` remains arbitrary same-user code execution; deliberately obfuscated or custom native code can bypass denylist heuristics. Use VM/container/OS isolation for hostile workloads.
 - The automatic installer targets Linux amd64/arm64 and systemd user services.
 - External ChatGPT/tunnel smoke requires the operator's own OpenAI tunnel identity/runtime credentials; repository CI cannot impersonate them.
 

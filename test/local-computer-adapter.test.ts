@@ -189,6 +189,27 @@ test('host display denial strips inherited desktop session environment from shel
   }
 });
 
+test('shell exec blocks obvious host capture bypasses before process spawn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-capture-guard-'));
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { roots: [root] },
+    shell: { enabled: true, allowedCommands: ['*'], maxRuntimeMs: 2_000, maxOutputBytes: 4096, allowEnvironment: true },
+    desktop: { hostDisplayAccess: false },
+  }));
+  try {
+    await assert.rejects(
+      () => adapter.exec({ command: 'python3', args: ['-c', 'import pyautogui; pyautogui.screenshot()'], cwd: root }),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => adapter.exec({ command: 'bash', args: ['-lc', 'ffmpeg -f x11grab -i :0 /tmp/shot.png'], cwd: root }),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('process listing includes the current test process', async () => {
   const { root, adapter } = await fixture();
   try {
