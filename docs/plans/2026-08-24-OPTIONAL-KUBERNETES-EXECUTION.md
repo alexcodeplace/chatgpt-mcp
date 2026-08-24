@@ -184,3 +184,25 @@ Only after `overdeck-vm` operates normally on the candidate:
 - Keep installation-specific Kubernetes config untracked/private.
 - Remove candidate/transient services and test pods after successful cutover; retain a known-good rollback bundle.
 - Final durable check: remote `main`, feature worktree HEAD, installed runtime HEAD, configs, and both tunnel targets are the intended versions with no drift.
+## Final cutover status — 2026-08-24
+
+Completed. Final production state:
+
+- generic Kubernetes execution remains strictly opt-in and disabled by default for public users
+- installation-specific cluster/image/kubeconfig/routing values remain private and configurable; no tailnet/K3s topology is hard-coded into public defaults
+- post-cutover stress testing exposed an unhandled child-process `EPIPE` on client disconnect during remote stdin/workspace streaming
+- production Kubernetes routing was disabled immediately while the defect was repaired; local MCP operation remained available
+- commit `885d685` contains the repair: child stdin errors and Kubernetes workspace pipe/spawn errors are contained and mapped to bounded adapter errors instead of crashing the Node process
+- deterministic regressions cover early stdin closure and remote workspace pipe closure
+- final generic gate passes 97/97 tests on the buildbox
+- the exact long MCP workflow that previously reproduced the crash passes 97/97 through Kubernetes on both the isolated fixed candidate and the promoted stable backend, with exit 0 and no backend restart
+- stable production backend is `885d685`, Kubernetes routing is enabled, and both `overdeck-vm` and `Overdeck` point to stable port 3210
+- both real connectors independently pass transparent Kubernetes execution and run the routed command from `/workspace`
+- production remote metrics show successful pod create/start/command/cleanup with zero remote errors for final connector proofs
+- no rollback/cutover/probe timers remain armed
+- candidate backend, image relay, probe pods, canary configs/scripts, and transient test artifacts were removed; the three-node warm executor DaemonSet and private parity record are retained
+- configured required executables were verified in the warm executor pod on all three nodes
+- Kubernetes DiskPressure taints are respected rather than bypassed; scheduling automatically uses healthy nodes when other workloads pressure a worker
+- pre-existing non-execution production configuration remains byte-equivalent in meaning to the pre-cutover configuration; the only intended production addition is the private opt-in `execution.kubernetes` configuration
+
+Success criteria are satisfied.
