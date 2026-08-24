@@ -172,3 +172,69 @@ test('running cancellation is reflected in controller metrics', async () => {
   gate.resolve();
   await running;
 });
+
+
+test('local and remote shell pools saturate independently without head-of-line blocking', async () => {
+  const config = parseConfig({ concurrency: { maxConcurrent: 6, reservedControlSlots: 1, shellMaxConcurrent: 1, maxQueue: 8, queueTimeoutMs: 1_000 } });
+  const c = new ConcurrencyController(config.concurrency, 2);
+  const localA = deferred();
+  const localB = deferred();
+  const remoteA = deferred();
+  const remoteB = deferred();
+  const remoteC = deferred();
+
+  const a = c.run('shell.exec', async () => localA.promise, undefined, 'shell-local');
+  const b = c.run('shell.exec', async () => localB.promise, undefined, 'shell-local');
+  const r1 = c.run('shell.exec', async () => remoteA.promise, undefined, 'shell-remote');
+  const r2 = c.run('shell.exec', async () => remoteB.promise, undefined, 'shell-remote');
+  const r3 = c.run('shell.exec', async () => remoteC.promise, undefined, 'shell-remote');
+  await tick();
+
+  let snapshot = c.snapshot();
+  assert.equal(snapshot.active.localShell, 1);
+  assert.equal(snapshot.active.remoteShell, 2);
+  assert.equal(snapshot.queued.localShell, 1);
+  assert.equal(snapshot.queued.remoteShell, 1);
+
+  remoteA.resolve();
+  await tick();
+  snapshot = c.snapshot();
+  assert.equal(snapshot.active.localShell, 1);
+  assert.equal(snapshot.active.remoteShell, 2);
+  assert.equal(snapshot.queued.remoteShell, 0);
+  assert.equal(snapshot.queued.localShell, 1);
+
+  localA.resolve();
+  await tick();
+  snapshot = c.snapshot();
+  assert.equal(snapshot.active.localShell, 1);
+  assert.equal(snapshot.queued.localShell, 0);
+
+  localB.resolve();
+  remoteB.resolve();
+  remoteC.resolve();
+  await Promise.all([a, b, r1, r2, r3]);
+  assert.equal(c.snapshot().peaks.localShell, 1);
+  assert.equal(c.snapshot().peaks.remoteShell, 2);
+});
+
+test('reserved control capacity survives simultaneous local and remote shell saturation', async () => {
+  const config = parseConfig({ concurrency: { maxConcurrent: 4, reservedControlSlots: 1, shellMaxConcurrent: 2, maxQueue: 8, queueTimeoutMs: 1_000 } });
+  const c = new ConcurrencyController(config.concurrency, 2);
+  const gates = [deferred(), deferred(), deferred(), deferred()];
+  const workloads = [
+    c.run('shell.exec', async () => gates[0]!.promise, undefined, 'shell-local'),
+    c.run('shell.exec', async () => gates[1]!.promise, undefined, 'shell-local'),
+    c.run('shell.exec', async () => gates[2]!.promise, undefined, 'shell-remote'),
+  ];
+  await tick();
+  assert.equal(c.snapshot().active.nonControl, 3);
+  let controlStarted = false;
+  const control = c.run('system.info', async () => { controlStarted = true; await gates[3]!.promise; });
+  await tick();
+  assert.equal(controlStarted, true);
+  assert.equal(c.snapshot().active.control, 1);
+  assert.equal(c.snapshot().active.total, 4);
+  for (const gate of gates) gate.resolve();
+  await Promise.all([...workloads, control]);
+});

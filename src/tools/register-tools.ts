@@ -2,7 +2,7 @@ import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { ComputerAdapter } from '../adapter/computer-adapter.js';
 import type { ChatGptMcpConfig } from '../config.js';
-import { ConcurrencyController } from '../concurrency.js';
+import { ConcurrencyController, type AdmissionClass } from '../concurrency.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
 
 const pathInput = z.string().min(1);
@@ -67,9 +67,10 @@ async function run(
   signal: AbortSignal,
   fn: () => Promise<Record<string, unknown>>,
   message?: (result: Record<string, unknown>) => string,
+  admissionOverride?: AdmissionClass,
 ): Promise<CallToolResult> {
   try {
-    const result = await concurrency.run(operation, fn, signal);
+    const result = await concurrency.run(operation, fn, signal, admissionOverride);
     return enforceTransportBudget(success(result, message?.(result)), operation);
   } catch (error) {
     return failure(error, operation);
@@ -231,14 +232,18 @@ export function registerTools(
         }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       },
-      async (args, ctx) => run('shell.exec', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.exec({
-        command: args.command,
-        args: args.args,
-        ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
-        ...(args.env === undefined ? {} : { env: args.env }),
-        ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
-        signal: ctx.mcpReq.signal,
-      }) })),
+      async (args, ctx) => {
+        const request = {
+          command: args.command,
+          args: args.args,
+          ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+          ...(args.env === undefined ? {} : { env: args.env }),
+          ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
+          signal: ctx.mcpReq.signal,
+        };
+        const admission = adapter.classifyExec?.(request) ?? 'shell-local';
+        return run('shell.exec', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.exec(request) }), undefined, admission);
+      },
     );
   }
 

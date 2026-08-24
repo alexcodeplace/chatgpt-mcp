@@ -10,7 +10,7 @@ import {
   toNodeHandler,
 } from '@modelcontextprotocol/node';
 import type { ComputerAdapter } from './adapter/computer-adapter.js';
-import { LocalComputerAdapter } from './adapter/local-computer-adapter.js';
+import { RoutingComputerAdapter } from './adapter/routing-computer-adapter.js';
 import type { ChatGptMcpConfig } from './config.js';
 import { ConcurrencyController } from './concurrency.js';
 import { createComputerMcpServerFactory } from './server.js';
@@ -87,8 +87,8 @@ function validators(config: Readonly<ChatGptMcpConfig>): {
 
 export function createComputerHttpServer(
   config: Readonly<ChatGptMcpConfig>,
-  adapter: ComputerAdapter = new LocalComputerAdapter(config),
-  concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency),
+  adapter: ComputerAdapter = new RoutingComputerAdapter(config),
+  concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency, config.execution.kubernetes.maxConcurrent),
 ): { server: NodeHttpServer; closeHandler(): Promise<void> } {
   const handler = createMcpHandler(createComputerMcpServerFactory(config, adapter, concurrency), {
     legacy: 'stateless',
@@ -120,7 +120,7 @@ export function createComputerHttpServer(
         const ready = snapshot.status !== 'overloaded';
         writeJson(res, ready ? 200 : 503, { ok: ready, service: '@platform-modules/chatgpt-mcp', concurrency: snapshot });
       } else {
-        writeJson(res, 200, { service: '@platform-modules/chatgpt-mcp', concurrency: snapshot });
+        writeJson(res, 200, { service: '@platform-modules/chatgpt-mcp', concurrency: snapshot, ...(adapter.executionMetrics === undefined ? {} : { execution: adapter.executionMetrics() }) });
       }
       return;
     }
@@ -147,7 +147,7 @@ export function createComputerHttpServer(
 
 export async function startComputerHttpServer(
   config: Readonly<ChatGptMcpConfig>,
-  adapter: ComputerAdapter = new LocalComputerAdapter(config),
+  adapter: ComputerAdapter = new RoutingComputerAdapter(config),
 ): Promise<RunningHttpServer> {
   const { server, closeHandler } = createComputerHttpServer(config, adapter);
   server.listen(config.http.port, config.http.host);

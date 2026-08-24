@@ -1,7 +1,7 @@
 import type { ChatGptMcpConfig } from './config.js';
 import { adapterError } from './errors.js';
 
-export type AdmissionClass = 'control' | 'normal' | 'shell';
+export type AdmissionClass = 'control' | 'normal' | 'shell-local' | 'shell-remote';
 
 const CONTROL_OPERATIONS = new Set([
   'system.info',
@@ -29,12 +29,13 @@ export interface ConcurrencySnapshot {
     maxNonControlConcurrent: number;
     reservedControlSlots: number;
     shellMaxConcurrent: number;
+    remoteShellMaxConcurrent: number;
     maxQueue: number;
     queueTimeoutMs: number;
   };
-  active: { total: number; control: number; nonControl: number; shell: number };
-  queued: { total: number; control: number; regular: number };
-  peaks: { active: number; shell: number; queued: number };
+  active: { total: number; control: number; nonControl: number; shell: number; localShell: number; remoteShell: number };
+  queued: { total: number; control: number; regular: number; localShell: number; remoteShell: number };
+  peaks: { active: number; shell: number; localShell: number; remoteShell: number; queued: number };
   counters: {
     submitted: number;
     accepted: number;
@@ -47,7 +48,7 @@ export interface ConcurrencySnapshot {
 }
 
 export function admissionClassForOperation(operation: string): AdmissionClass {
-  if (operation === 'shell.exec') return 'shell';
+  if (operation === 'shell.exec') return 'shell-local';
   if (CONTROL_OPERATIONS.has(operation)) return 'control';
   return 'normal';
 }
@@ -56,11 +57,14 @@ export class ConcurrencyController {
   private active = 0;
   private activeControl = 0;
   private activeNonControl = 0;
-  private activeShell = 0;
+  private activeShellLocal = 0;
+  private activeShellRemote = 0;
   private readonly controlQueue: QueueEntry[] = [];
   private readonly regularQueue: QueueEntry[] = [];
   private peakActive = 0;
   private peakShell = 0;
+  private peakShellLocal = 0;
+  private peakShellRemote = 0;
   private peakQueued = 0;
   private submitted = 0;
   private accepted = 0;
@@ -70,16 +74,19 @@ export class ConcurrencyController {
   private timedOut = 0;
   private cancelled = 0;
 
-  constructor(private readonly config: Readonly<ChatGptMcpConfig['concurrency']>) {}
+  constructor(
+    private readonly config: Readonly<ChatGptMcpConfig['concurrency']>,
+    private readonly remoteShellMaxConcurrent = 24,
+  ) {}
 
-  async run<T>(operation: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async run<T>(operation: string, fn: () => Promise<T>, signal?: AbortSignal, admissionOverride?: AdmissionClass): Promise<T> {
     this.submitted += 1;
     if (signal?.aborted) {
       this.cancelled += 1;
       throw adapterError('CANCELLED', operation, 'Request was cancelled before execution.');
     }
 
-    const kind = admissionClassForOperation(operation);
+    const kind = admissionOverride ?? admissionClassForOperation(operation);
     if (this.canStart(kind)) {
       this.accepted += 1;
       return await this.execute(operation, kind, fn, signal);
@@ -137,12 +144,13 @@ export class ConcurrencyController {
         maxNonControlConcurrent: this.maxNonControlConcurrent(),
         reservedControlSlots: this.config.reservedControlSlots,
         shellMaxConcurrent: this.config.shellMaxConcurrent,
+        remoteShellMaxConcurrent: this.remoteShellMaxConcurrent,
         maxQueue: this.config.maxQueue,
         queueTimeoutMs: this.config.queueTimeoutMs,
       },
-      active: { total: this.active, control: this.activeControl, nonControl: this.activeNonControl, shell: this.activeShell },
-      queued: { total: queued, control: this.controlQueue.length, regular: this.regularQueue.length },
-      peaks: { active: this.peakActive, shell: this.peakShell, queued: this.peakQueued },
+      active: { total: this.active, control: this.activeControl, nonControl: this.activeNonControl, shell: this.activeShellLocal + this.activeShellRemote, localShell: this.activeShellLocal, remoteShell: this.activeShellRemote },
+      queued: { total: queued, control: this.controlQueue.length, regular: this.regularQueue.length, localShell: this.regularQueue.filter(entry => entry.kind === 'shell-local').length, remoteShell: this.regularQueue.filter(entry => entry.kind === 'shell-remote').length },
+      peaks: { active: this.peakActive, shell: this.peakShell, localShell: this.peakShellLocal, remoteShell: this.peakShellRemote, queued: this.peakQueued },
       counters: {
         submitted: this.submitted,
         accepted: this.accepted,
@@ -167,7 +175,8 @@ export class ConcurrencyController {
     if (this.active >= this.config.maxConcurrent) return false;
     if (kind === 'control') return true;
     if (this.activeNonControl >= this.maxNonControlConcurrent()) return false;
-    if (kind === 'shell' && this.activeShell >= this.config.shellMaxConcurrent) return false;
+    if (kind === 'shell-local' && this.activeShellLocal >= this.config.shellMaxConcurrent) return false;
+    if (kind === 'shell-remote' && this.activeShellRemote >= this.remoteShellMaxConcurrent) return false;
     return true;
   }
 
@@ -176,9 +185,12 @@ export class ConcurrencyController {
     return adapterError('OVERLOADED', operation, message, {
       active: snapshot.active.total,
       activeShell: snapshot.active.shell,
+      activeLocalShell: snapshot.active.localShell,
+      activeRemoteShell: snapshot.active.remoteShell,
       queued: snapshot.queued.total,
       maxConcurrent: snapshot.limits.maxConcurrent,
       shellMaxConcurrent: snapshot.limits.shellMaxConcurrent,
+      remoteShellMaxConcurrent: snapshot.limits.remoteShellMaxConcurrent,
       maxQueue: snapshot.limits.maxQueue,
     });
   }
@@ -219,10 +231,13 @@ export class ConcurrencyController {
     this.active += 1;
     if (kind === 'control') this.activeControl += 1;
     else this.activeNonControl += 1;
-    if (kind === 'shell') this.activeShell += 1;
+    if (kind === 'shell-local') this.activeShellLocal += 1;
+    if (kind === 'shell-remote') this.activeShellRemote += 1;
     this.started += 1;
     this.peakActive = Math.max(this.peakActive, this.active);
-    this.peakShell = Math.max(this.peakShell, this.activeShell);
+    this.peakShell = Math.max(this.peakShell, this.activeShellLocal + this.activeShellRemote);
+    this.peakShellLocal = Math.max(this.peakShellLocal, this.activeShellLocal);
+    this.peakShellRemote = Math.max(this.peakShellRemote, this.activeShellRemote);
 
     let cancellationRecorded = false;
     const abortHandler = (): void => {
@@ -240,7 +255,8 @@ export class ConcurrencyController {
       this.active -= 1;
       if (kind === 'control') this.activeControl -= 1;
       else this.activeNonControl -= 1;
-      if (kind === 'shell') this.activeShell -= 1;
+      if (kind === 'shell-local') this.activeShellLocal -= 1;
+      if (kind === 'shell-remote') this.activeShellRemote -= 1;
       this.completed += 1;
       this.drain();
     }

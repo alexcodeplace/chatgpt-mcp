@@ -1,5 +1,44 @@
 import { adapterError } from '../errors.js';
 
+
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_ENV_ENTRIES = 64;
+const MAX_ENV_VALUE_BYTES = 32 * 1024;
+const HOST_DISPLAY_ENV_KEYS = new Set(['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'MIR_SOCKET', 'DBUS_SESSION_BUS_ADDRESS']);
+
+export function sanitizeHostDisplayEnvironment(env: NodeJS.ProcessEnv, hostDisplayAccess: boolean): NodeJS.ProcessEnv {
+  if (hostDisplayAccess) return env;
+  const sanitized = { ...env };
+  for (const key of HOST_DISPLAY_ENV_KEYS) delete sanitized[key];
+  return sanitized;
+}
+
+export function validateShellEnvironment(
+  env: Readonly<Record<string, string>> | undefined,
+  allowEnvironment: boolean,
+  hostDisplayAccess: boolean,
+  inheritProcessEnvironment = true,
+): NodeJS.ProcessEnv | undefined {
+  const base = inheritProcessEnvironment ? { ...process.env } : {};
+  if (env === undefined) return sanitizeHostDisplayEnvironment(base, hostDisplayAccess);
+  if (!allowEnvironment) {
+    throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Caller-provided environment variables are disabled.');
+  }
+  const entries = Object.entries(env);
+  if (entries.length > MAX_ENV_ENTRIES) {
+    throw adapterError('INVALID_INPUT', 'shell.exec', 'Too many caller-provided environment variables.', { maximum: MAX_ENV_ENTRIES });
+  }
+  for (const [key, value] of entries) {
+    if (!ENV_KEY.test(key) || Buffer.byteLength(value, 'utf8') > MAX_ENV_VALUE_BYTES) {
+      throw adapterError('INVALID_INPUT', 'shell.exec', 'Invalid caller-provided environment variable.', { key });
+    }
+    if (!hostDisplayAccess && HOST_DISPLAY_ENV_KEYS.has(key)) {
+      throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Host display environment access is disabled.', { key });
+    }
+  }
+  return sanitizeHostDisplayEnvironment({ ...base, ...env }, hostDisplayAccess);
+}
+
 const HOST_CAPTURE_EXECUTABLES = new Set([
   'deepin-screenshot',
   'flameshot',

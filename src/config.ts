@@ -60,6 +60,82 @@ const desktopSchema = z.object({
 });
 
 
+
+const kubernetesClientSchema = z.object({
+  command: z.string().min(1).default('kubectl'),
+  args: z.array(z.string()).default([]),
+  kubeconfig: z.string().min(1).optional(),
+  context: z.string().min(1).optional(),
+});
+
+const kubernetesWorkspaceSchema = z.object({
+  mode: z.literal('snapshot').default('snapshot'),
+  containerPath: z.string().min(1).default('/workspace'),
+  exclude: z.array(z.string()).default([]),
+  maxArchiveBytes: z.number().int().positive().max(16 * 1024 * 1024 * 1024).default(2 * 1024 * 1024 * 1024),
+});
+
+const kubernetesResourcesSchema = z.object({
+  requests: z.record(z.string().min(1), z.string().min(1)).default({}),
+  limits: z.record(z.string().min(1), z.string().min(1)).default({}),
+});
+
+const kubernetesSchema = z.object({
+  enabled: z.boolean().default(false),
+  client: kubernetesClientSchema.default({ command: 'kubectl', args: [] }),
+  namespace: z.string().min(1).default('default'),
+  image: z.string().min(1).optional(),
+  imagePullPolicy: z.enum(['Always', 'IfNotPresent', 'Never']).default('IfNotPresent'),
+  imagePullSecrets: z.array(z.string().min(1)).default([]),
+  serviceAccount: z.string().min(1).optional(),
+  remoteCommands: z.array(z.string().min(1)).default([]),
+  localOnlyCommands: z.array(z.string().min(1)).default([]),
+  heavyCommandPatterns: z.array(z.string().min(1)).default([]),
+  maxConcurrent: z.number().int().positive().max(1024).default(24),
+  startupTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(60_000),
+  cleanupTimeoutMs: z.number().int().positive().max(5 * 60 * 1000).default(15_000),
+  workspace: kubernetesWorkspaceSchema.default({ mode: 'snapshot', containerPath: '/workspace', exclude: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }),
+  resources: kubernetesResourcesSchema.default({ requests: {}, limits: {} }),
+  nodeSelector: z.record(z.string().min(1), z.string()).default({}),
+  tolerations: z.array(z.record(z.string(), z.unknown())).default([]),
+  podLabels: z.record(z.string().min(1), z.string()).default({}),
+  podAnnotations: z.record(z.string().min(1), z.string()).default({}),
+  volumes: z.array(z.record(z.string(), z.unknown())).default([]),
+  volumeMounts: z.array(z.record(z.string(), z.unknown())).default([]),
+  ttlSeconds: z.number().int().positive().max(7 * 24 * 60 * 60).default(300),
+  requiredCommands: z.array(z.string().min(1)).default([]),
+  requiredEnvironment: z.record(z.string().min(1), z.string()).default({}),
+  versionChecks: z.record(z.string().min(1), z.object({ args: z.array(z.string()).default(['--version']), pattern: z.string().min(1) })).default({}),
+}).superRefine((value, ctx) => {
+  if (value.enabled && value.image === undefined) {
+    ctx.addIssue({ code: 'custom', path: ['image'], message: 'image is required when Kubernetes execution is enabled' });
+  }
+  for (const [index, pattern] of value.heavyCommandPatterns.entries()) {
+    try { new RegExp(pattern); } catch {
+      ctx.addIssue({ code: 'custom', path: ['heavyCommandPatterns', index], message: 'pattern must be a valid regular expression' });
+    }
+  }
+  for (const [command, check] of Object.entries(value.versionChecks)) {
+    try { new RegExp(check.pattern); } catch {
+      ctx.addIssue({ code: 'custom', path: ['versionChecks', command, 'pattern'], message: 'version check pattern must be a valid regular expression' });
+    }
+  }
+});
+
+const executionSchema = z.object({
+  defaultBackend: z.literal('local').default('local'),
+  lightweightTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
+  lightweightOutputBytes: z.number().int().positive().max(16 * 1024 * 1024).default(1024 * 1024),
+  kubernetes: kubernetesSchema.default({
+    enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', imagePullSecrets: [],
+    remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24,
+    startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000,
+    workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 },
+    resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [],
+    ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {},
+  }),
+});
+
 const concurrencySchema = z.object({
   maxConcurrent: z.number().int().min(2).max(1024).default(48),
   reservedControlSlots: z.number().int().min(0).max(1023).default(8),
@@ -84,6 +160,7 @@ const httpSchema = z.object({
 });
 
 const configSchema = z.object({
+  execution: executionSchema.default({ defaultBackend: 'local', lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
   concurrency: concurrencySchema.default({ maxConcurrent: 48, reservedControlSlots: 8, shellMaxConcurrent: 8, maxQueue: 64, queueTimeoutMs: 30_000 }),
   http: httpSchema.default({ host: '127.0.0.1', port: 3210, allowedHosts: [], allowedOrigins: [] }),
   filesystem: filesystemSchema.default({ read: false, write: false, roots: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),

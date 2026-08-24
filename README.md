@@ -293,6 +293,20 @@ The HTTP backend uses one process-wide admission controller shared by every stat
 
 The defaults can be changed through the `concurrency` object in the JSON configuration. Keep `reservedControlSlots < maxConcurrent` and `shellMaxConcurrent <= maxConcurrent - reservedControlSlots`.
 
+### Optional Kubernetes execution
+
+`chatgpt-mcp` is local-only by default. The optional `execution.kubernetes` backend can move explicitly eligible `shell.exec` calls into isolated Kubernetes pods, while filesystem, process, service, application, browser, desktop, and non-routed shell operations retain the existing local-host semantics. Kubernetes support is distribution-neutral: K3s is supported, but no K3s, Tailscale, node-name, namespace, registry, CNI, storage-class, or hostPath assumption is compiled into the package.
+
+The backend is opt-in: `execution.kubernetes.enabled` defaults to `false`, `execution.defaultBackend` is `local`, and an empty `remoteCommands`/`heavyCommandPatterns` set routes nothing remotely. With Kubernetes disabled, startup does not invoke or probe `kubectl`; existing configuration files remain local-only.
+
+All deployment details are configuration, including the Kubernetes client command/arguments, kubeconfig/context, namespace, executor image and pull policy/secrets, service account, remote/local-only routing rules, remote concurrency, workspace path/excludes/archive limit, resource requests/limits, node selectors, tolerations, labels/annotations, volumes/mounts, startup/cleanup limits, required commands/environment, and optional executable-version checks. Keep installation-specific values such as private registry names, cluster contexts, Tailscale addresses, and node labels in an untracked/private `config.local.json`, not in public defaults.
+
+Remote execution requires an explicit `cwd`. The authorized working directory is copied as a bounded tar snapshot into an isolated pod workspace; generated changes are not synchronized back. This makes remote execution appropriate for builds, tests, analysis, and other disposable compute, not for commands intended to mutate the authoritative workstation tree. Explicit `localOnlyCommands` always win over remote routing and unknown commands remain local.
+
+Local and remote shell execution have distinct admission pools. `concurrency.shellMaxConcurrent` controls local shell concurrency; `execution.kubernetes.maxConcurrent` controls remote shell concurrency. Both still share the global non-control budget and the reserved control slots. `/metrics` reports the two pools independently along with routing, output-byte, duration, and Kubernetes lifecycle counters.
+
+Command output is spooled to bounded temporary files rather than accumulated as unbounded chunk arrays in Node memory. `execution.lightweightTimeoutMs` and `execution.lightweightOutputBytes` provide conservative limits for short helper operations; explicit shell runtime/output limits remain governed by the existing `shell` configuration.
+
 Operational endpoints:
 
 ```text

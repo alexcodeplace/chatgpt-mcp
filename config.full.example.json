@@ -1,4 +1,45 @@
 {
+  "execution": {
+    "defaultBackend": "local",
+    "lightweightTimeoutMs": 30000,
+    "lightweightOutputBytes": 1048576,
+    "kubernetes": {
+      "enabled": false,
+      "client": {
+        "command": "kubectl",
+        "args": []
+      },
+      "namespace": "default",
+      "imagePullPolicy": "IfNotPresent",
+      "imagePullSecrets": [],
+      "remoteCommands": [],
+      "localOnlyCommands": [],
+      "heavyCommandPatterns": [],
+      "maxConcurrent": 24,
+      "startupTimeoutMs": 60000,
+      "cleanupTimeoutMs": 15000,
+      "workspace": {
+        "mode": "snapshot",
+        "containerPath": "/workspace",
+        "exclude": [],
+        "maxArchiveBytes": 2147483648
+      },
+      "resources": {
+        "requests": {},
+        "limits": {}
+      },
+      "nodeSelector": {},
+      "tolerations": [],
+      "podLabels": {},
+      "podAnnotations": {},
+      "volumes": [],
+      "volumeMounts": [],
+      "ttlSeconds": 300,
+      "requiredCommands": [],
+      "requiredEnvironment": {},
+      "versionChecks": {}
+    }
+  },
   "concurrency": {
     "maxConcurrent": 48,
     "reservedControlSlots": 8,

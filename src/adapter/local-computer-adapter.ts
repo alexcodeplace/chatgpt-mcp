@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
 import { authorizePath } from '../policy/filesystem.js';
-import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime } from '../policy/shell.js';
+import { spawnBounded } from '../execution/bounded-process.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
 import type {
   ApplicationLaunchResult,
   ComputerAdapter,
@@ -22,16 +23,10 @@ import type {
   SystemInfo,
 } from './computer-adapter.js';
 
-const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SERVICE_NAME = /^[A-Za-z0-9_.@:-]+$/;
-const MAX_ENV_ENTRIES = 64;
-const MAX_ENV_VALUE_BYTES = 32 * 1024;
 const MAX_APPLICATION_ARGS = 256;
 const MAX_APPLICATION_ARG_BYTES = 64 * 1024;
 const MAX_URL_BYTES = 16 * 1024;
-const FORCE_KILL_DELAY_MS = 1_000;
-const INTERNAL_OUTPUT_LIMIT = 4 * 1024 * 1024;
-const HOST_DISPLAY_ENV_KEYS = new Set(['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'MIR_SOCKET', 'DBUS_SESSION_BUS_ADDRESS']);
 
 function requireCapability(enabled: boolean, operation: string, message: string): void {
   if (!enabled) throw adapterError('CAPABILITY_DISABLED', operation, message);
@@ -59,173 +54,17 @@ function mapOsError(error: unknown, operation: string, details?: Record<string, 
   });
 }
 
-function sanitizeHostDisplayEnvironment(env: NodeJS.ProcessEnv, hostDisplayAccess: boolean): NodeJS.ProcessEnv {
-  if (hostDisplayAccess) return env;
-  const sanitized = { ...env };
-  for (const key of HOST_DISPLAY_ENV_KEYS) delete sanitized[key];
-  return sanitized;
-}
-
-function validateEnvironment(
-  env: Readonly<Record<string, string>> | undefined,
-  allowEnvironment: boolean,
-  hostDisplayAccess: boolean,
-): NodeJS.ProcessEnv | undefined {
-  if (env === undefined) {
-    return hostDisplayAccess ? undefined : sanitizeHostDisplayEnvironment({ ...process.env }, false);
-  }
-  if (!allowEnvironment) {
-    throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Caller-provided environment variables are disabled.');
-  }
-  const entries = Object.entries(env);
-  if (entries.length > MAX_ENV_ENTRIES) {
-    throw adapterError('INVALID_INPUT', 'shell.exec', 'Too many caller-provided environment variables.', {
-      maximum: MAX_ENV_ENTRIES,
-    });
-  }
-  for (const [key, value] of entries) {
-    if (!ENV_KEY.test(key) || Buffer.byteLength(value, 'utf8') > MAX_ENV_VALUE_BYTES) {
-      throw adapterError('INVALID_INPUT', 'shell.exec', 'Invalid caller-provided environment variable.', { key });
-    }
-    if (!hostDisplayAccess && HOST_DISPLAY_ENV_KEYS.has(key)) {
-      throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Host display environment access is disabled.', { key });
-    }
-  }
-  return sanitizeHostDisplayEnvironment({ ...process.env, ...env }, hostDisplayAccess);
-}
-
-type CaptureOptions = {
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-  timeoutMs: number;
-  maxOutputBytes: number;
-  operation: string;
-  signal?: AbortSignal;
-};
-
-function spawnBounded(command: string, args: readonly string[], options: CaptureOptions): Promise<ExecResult> {
-  return new Promise((resolve, reject) => {
-    if (options.signal?.aborted) {
-      reject(adapterError('CANCELLED', options.operation, 'Request was cancelled before process spawn.'));
-      return;
-    }
-    const started = process.hrtime.bigint();
-    const useProcessGroup = platform() !== 'win32';
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(command, [...args], {
-        cwd: options.cwd,
-        env: options.env ?? process.env,
-        shell: false,
-        detached: useProcessGroup,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (error) {
-      mapOsError(error, options.operation, { command });
-    }
-
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let outputBytes = 0;
-    let timedOut = false;
-    let outputExceeded = false;
-    let cancelled = false;
-    let spawnError: unknown;
-    let closed = false;
-
-    const signalProcess = (signal: NodeJS.Signals): void => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      if (useProcessGroup && child.pid !== undefined) {
-        try {
-          process.kill(-child.pid, signal);
-          return;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill(signal);
-          return;
-        }
-      }
-      child.kill(signal);
-    };
-
-    const terminate = (): void => {
-      signalProcess('SIGTERM');
-      const forceTimer = setTimeout(() => signalProcess('SIGKILL'), FORCE_KILL_DELAY_MS);
-      forceTimer.unref();
-    };
-
-    const abortHandler = (): void => {
-      cancelled = true;
-      terminate();
-    };
-    options.signal?.addEventListener('abort', abortHandler, { once: true });
-
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      terminate();
-    }, options.timeoutMs);
-    timeout.unref();
-
-    const collect = (target: Buffer[], chunk: Buffer): void => {
-      if (outputExceeded) return;
-      outputBytes += chunk.length;
-      if (outputBytes > options.maxOutputBytes) {
-        outputExceeded = true;
-        terminate();
-        return;
-      }
-      target.push(Buffer.from(chunk));
-    };
-
-    child.stdout?.on('data', (chunk: Buffer) => collect(stdout, chunk));
-    child.stderr?.on('data', (chunk: Buffer) => collect(stderr, chunk));
-    child.on('error', error => {
-      spawnError = error;
-    });
-    child.on('close', exitCode => {
-      if (closed) return;
-      closed = true;
-      clearTimeout(timeout);
-      options.signal?.removeEventListener('abort', abortHandler);
-      const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000;
-      if (cancelled) {
-        reject(adapterError('CANCELLED', options.operation, 'Request was cancelled during command execution.'));
-        return;
-      }
-      if (outputExceeded) {
-        reject(adapterError('OUTPUT_LIMIT', options.operation, 'Command output exceeded the configured byte limit.', {
-          maximum: options.maxOutputBytes,
-        }));
-        return;
-      }
-      if (spawnError !== undefined) {
-        try {
-          mapOsError(spawnError, options.operation, { command });
-        } catch (error) {
-          reject(error);
-        }
-        return;
-      }
-      resolve({
-        exitCode,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-        durationMs,
-        timedOut,
-      });
-    });
-  });
-}
-
 async function requireSuccessfulCommand(
   command: string,
   args: readonly string[],
   operation: string,
   timeoutMs: number,
   env?: NodeJS.ProcessEnv,
+  maxOutputBytes = 1024 * 1024,
 ): Promise<ExecResult> {
   const result = await spawnBounded(command, args, {
     timeoutMs,
-    maxOutputBytes: INTERNAL_OUTPUT_LIMIT,
+    maxOutputBytes,
     operation,
     ...(env === undefined ? {} : { env }),
   });
@@ -385,7 +224,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     if (request.cwd !== undefined) {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
-    const env = validateEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
+    const env = validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
     return spawnBounded(request.command, request.args, {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
@@ -401,8 +240,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.process.list, operation, 'Process listing is disabled.');
     try {
       const result = await spawnBounded('ps', ['-eo', 'pid=,ppid=,user=,comm='], {
-        timeoutMs: 10_000,
-        maxOutputBytes: INTERNAL_OUTPUT_LIMIT,
+        timeoutMs: Math.min(10_000, this.config.execution.lightweightTimeoutMs),
+        maxOutputBytes: this.config.execution.lightweightOutputBytes,
         operation,
       });
       if (result.timedOut) throw adapterError('TIMEOUT', operation, 'Process listing timed out.');
@@ -455,6 +294,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
         ['show', name, '--property=ActiveState,SubState,Description', '--no-pager'],
         operation,
         this.config.service.maxRuntimeMs,
+        undefined,
+        this.config.execution.lightweightOutputBytes,
       );
       const fields = Object.fromEntries(result.stdout.split('\n').flatMap(line => {
         const index = line.indexOf('=');
@@ -480,6 +321,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
         [action, name, '--no-pager'],
         operation,
         this.config.service.maxRuntimeMs,
+        undefined,
+        this.config.execution.lightweightOutputBytes,
       );
     } catch (error) {
       mapOsError(error, operation, { name, action });
@@ -581,6 +424,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
         operation,
         this.config.browser.maxRuntimeMs,
         sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess),
+        this.config.execution.lightweightOutputBytes,
       );
     } catch (error) {
       mapOsError(error, operation, { scheme });
@@ -643,7 +487,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.input, operation, 'Desktop input is disabled.');
     try {
-      await requireSuccessfulCommand('xdotool', args, operation, 30_000);
+      await requireSuccessfulCommand('xdotool', args, operation, Math.min(30_000, this.config.execution.lightweightTimeoutMs), undefined, this.config.execution.lightweightOutputBytes);
     } catch (error) {
       mapOsError(error, operation);
     }

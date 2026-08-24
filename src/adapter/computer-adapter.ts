@@ -25,6 +25,8 @@ export interface ExecRequest {
   signal?: AbortSignal;
 }
 
+export type ShellExecutionClass = 'shell-local' | 'shell-remote';
+
 export interface ExecResult {
   exitCode: number | null;
   stdout: string;
@@ -71,7 +73,9 @@ export interface ComputerAdapter {
   makeDirectory(path: string, recursive: boolean): Promise<void>;
   movePath(source: string, destination: string): Promise<void>;
   deletePath(path: string, recursive: boolean): Promise<void>;
+  classifyExec?(request: ExecRequest): ShellExecutionClass;
   exec(request: ExecRequest): Promise<ExecResult>;
+  executionMetrics?(): Record<string, unknown>;
   listProcesses(): Promise<readonly ProcessInfo[]>;
   killProcess(pid: number, signal?: NodeJS.Signals): Promise<void>;
   serviceStatus(name: string): Promise<ServiceStatus>;

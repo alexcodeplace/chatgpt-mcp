@@ -87,3 +87,68 @@ test('malformed configuration fails closed', () => {
   assert.throws(() => parseConfig({ concurrency: { maxConcurrent: 8, reservedControlSlots: 8 } }));
   assert.throws(() => parseConfig({ concurrency: { maxConcurrent: 8, reservedControlSlots: 2, shellMaxConcurrent: 7 } }));
 });
+
+
+test('Kubernetes execution is strictly opt-in and local-only by default', () => {
+  const config = parseConfig({});
+  assert.equal(config.execution.defaultBackend, 'local');
+  assert.equal(config.execution.lightweightTimeoutMs, 30_000);
+  assert.equal(config.execution.lightweightOutputBytes, 1024 * 1024);
+  assert.equal(config.execution.kubernetes.enabled, false);
+  assert.equal(config.execution.kubernetes.client.command, 'kubectl');
+  assert.equal(config.execution.kubernetes.remoteCommands.length, 0);
+  assert.equal(config.execution.kubernetes.localOnlyCommands.length, 0);
+});
+
+test('Kubernetes execution requires an image only when explicitly enabled', () => {
+  assert.doesNotThrow(() => parseConfig({ execution: { kubernetes: { enabled: false } } }));
+  assert.throws(
+    () => parseConfig({ execution: { kubernetes: { enabled: true } } }),
+    /image is required when Kubernetes execution is enabled/,
+  );
+});
+
+test('Kubernetes execution accepts cluster-specific values only through configuration', () => {
+  const config = parseConfig({
+    execution: {
+      lightweightTimeoutMs: 12_345,
+      kubernetes: {
+        enabled: true,
+        client: { command: 'clusterctl-wrapper', args: ['--profile', 'example'], kubeconfig: '/tmp/example-kubeconfig', context: 'example-context' },
+        namespace: 'example-namespace',
+        image: 'registry.example/executor:1',
+        imagePullPolicy: 'Never',
+        imagePullSecrets: ['registry-creds'],
+        serviceAccount: 'executor-sa',
+        remoteCommands: ['pnpm'],
+        localOnlyCommands: ['systemctl'],
+        heavyCommandPatterns: ['^npm test'],
+        maxConcurrent: 17,
+        workspace: { containerPath: '/custom-workspace', exclude: ['node_modules'], maxArchiveBytes: 123456 },
+        resources: { requests: { cpu: '250m' }, limits: { memory: '2Gi' } },
+        nodeSelector: { 'example.invalid/pool': 'build' },
+        tolerations: [{ key: 'workload', operator: 'Equal', value: 'build', effect: 'NoSchedule' }],
+        podLabels: { 'example.invalid/owner': 'tests' },
+        podAnnotations: { 'example.invalid/note': 'configured' },
+        volumes: [{ name: 'cache', emptyDir: {} }],
+        volumeMounts: [{ name: 'cache', mountPath: '/cache' }],
+        requiredCommands: ['node', 'pnpm'],
+        requiredEnvironment: { CI: '1' },
+        versionChecks: { node: { args: ['--version'], pattern: '^v24\\.' } },
+      },
+    },
+  });
+  assert.equal(config.execution.kubernetes.client.command, 'clusterctl-wrapper');
+  assert.equal(config.execution.kubernetes.client.context, 'example-context');
+  assert.equal(config.execution.kubernetes.namespace, 'example-namespace');
+  assert.equal(config.execution.kubernetes.maxConcurrent, 17);
+  assert.equal(config.execution.kubernetes.nodeSelector['example.invalid/pool'], 'build');
+  assert.equal(config.execution.kubernetes.workspace.containerPath, '/custom-workspace');
+});
+
+test('invalid Kubernetes heavy routing regular expressions fail closed', () => {
+  assert.throws(
+    () => parseConfig({ execution: { kubernetes: { heavyCommandPatterns: ['[invalid'] } } }),
+    /valid regular expression/,
+  );
+});

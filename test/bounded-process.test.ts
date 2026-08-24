@@ -1,0 +1,56 @@
+import assert from 'node:assert/strict';
+import { readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import test from 'node:test';
+import { spawnBounded } from '../src/execution/bounded-process.js';
+
+async function spoolEntries(): Promise<Set<string>> {
+  return new Set((await readdir(tmpdir())).filter(name => name.startsWith('chatgpt-mcp-spool-')));
+}
+
+test('bounded process spools multi-megabyte output and cleans temporary files', async () => {
+  const before = await spoolEntries();
+  const bytes = 2 * 1024 * 1024;
+  const result = await spawnBounded(process.execPath, ['-e', `process.stdout.write('x'.repeat(${bytes}))`], {
+    timeoutMs: 10_000,
+    maxOutputBytes: bytes + 1024,
+    operation: 'test.spool',
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(Buffer.byteLength(result.stdout), bytes);
+  assert.equal(result.stderr, '');
+  const after = await spoolEntries();
+  assert.deepEqual(after, before);
+});
+
+test('bounded process cleans spool files after output overflow', async () => {
+  const before = await spoolEntries();
+  await assert.rejects(
+    () => spawnBounded(process.execPath, ['-e', `process.stdout.write('x'.repeat(1048576))`], {
+      timeoutMs: 10_000,
+      maxOutputBytes: 4096,
+      operation: 'test.spool.limit',
+    }),
+    (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OUTPUT_LIMIT',
+  );
+  const after = await spoolEntries();
+  assert.deepEqual(after, before);
+});
+
+test('bounded process cleans spool files after cancellation', async () => {
+  const before = await spoolEntries();
+  const abort = new AbortController();
+  const running = spawnBounded(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    timeoutMs: 10_000,
+    maxOutputBytes: 4096,
+    operation: 'test.spool.cancel',
+    signal: abort.signal,
+  });
+  setTimeout(() => abort.abort(), 30).unref();
+  await assert.rejects(
+    () => running,
+    (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CANCELLED',
+  );
+  const after = await spoolEntries();
+  assert.deepEqual(after, before);
+});
