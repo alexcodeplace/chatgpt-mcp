@@ -7,6 +7,43 @@ import test from 'node:test';
 import { LocalComputerAdapter } from '../src/adapter/local-computer-adapter.js';
 import { parseConfig } from '../src/config.js';
 
+
+async function waitForPidFile(path: string): Promise<number> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const value = Number((await readFile(path, 'utf8')).trim());
+      if (Number.isInteger(value) && value > 0) return value;
+    } catch {
+      // Process has not written the file yet.
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for child PID file: ${path}`);
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`Descendant process ${pid} survived bounded command termination.`);
+}
+
+function descendantScript(): string {
+  return [
+    `const {spawn}=require('node:child_process');`,
+    `const {writeFileSync}=require('node:fs');`,
+    `const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});`,
+    `writeFileSync(process.argv[1],String(child.pid));`,
+    `setInterval(()=>{},1000);`,
+  ].join('');
+}
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-adapter-'));
   const config = parseConfig({
@@ -234,6 +271,50 @@ test('process kill terminates a disposable child', async () => {
     assert.notEqual(child.exitCode, 0);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('shell cancellation terminates the complete descendant process group', { skip: process.platform === 'win32' }, async () => {
+  const { root, adapter } = await fixture();
+  const pidFile = join(root, 'cancel-child.pid');
+  const abort = new AbortController();
+  try {
+    const execution = adapter.exec({
+      command: 'node',
+      args: ['-e', descendantScript(), pidFile],
+      cwd: root,
+      timeoutMs: 2_000,
+      signal: abort.signal,
+    });
+    const childPid = await waitForPidFile(pidFile);
+    abort.abort();
+    await assert.rejects(
+      () => execution,
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CANCELLED',
+    );
+    await waitForProcessExit(childPid);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shell timeout terminates descendants in the command process group', { skip: process.platform === 'win32' }, async () => {
+  const { root, adapter } = await fixture();
+  const pidFile = join(root, 'timeout-child.pid');
+  try {
+    const execution = adapter.exec({
+      command: 'node',
+      args: ['-e', descendantScript(), pidFile],
+      cwd: root,
+      timeoutMs: 100,
+    });
+    const childPid = await waitForPidFile(pidFile);
+    const result = await execution;
+    assert.equal(result.timedOut, true);
+    await waitForProcessExit(childPid);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

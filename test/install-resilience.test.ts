@@ -14,6 +14,11 @@ test('installer keeps MCP lifetime independent from tunnel lifetime', async () =
   assert.match(install, /--sample sample_mcp_remote_no_auth/);
   assert.match(install, /--mcp-server-url "http:\/\/127\.0\.0\.1:3210\/mcp"/);
   assert.match(install, /Restart=always\nRestartSec=1/);
+  assert.match(install, /TasksMax=512/);
+  assert.match(install, /LimitNOFILE=65536/);
+  assert.match(install, /MemoryHigh=6G/);
+  assert.match(install, /MemoryMax=9G/);
+  assert.match(install, /CPUWeight=80/);
   assert.match(install, /OnUnitActiveSec=15s/);
   assert.match(install, /watchdog-\$PROFILE_NAME\.sh/);
   assert.doesNotMatch(install, /--mcp-command .*dist\/src\/stdio\.js/);

@@ -2,6 +2,7 @@ import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { ComputerAdapter } from '../adapter/computer-adapter.js';
 import type { ChatGptMcpConfig } from '../config.js';
+import { ConcurrencyController } from '../concurrency.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
 
 const pathInput = z.string().min(1);
@@ -62,11 +63,13 @@ function enforceTransportBudget(result: CallToolResult, operation: string): Call
 
 async function run(
   operation: string,
+  concurrency: ConcurrencyController,
+  signal: AbortSignal,
   fn: () => Promise<Record<string, unknown>>,
   message?: (result: Record<string, unknown>) => string,
 ): Promise<CallToolResult> {
   try {
-    const result = await fn();
+    const result = await concurrency.run(operation, fn, signal);
     return enforceTransportBudget(success(result, message?.(result)), operation);
   } catch (error) {
     return failure(error, operation);
@@ -77,6 +80,7 @@ export function registerTools(
   server: McpServer,
   config: Readonly<ChatGptMcpConfig>,
   adapter: ComputerAdapter,
+  concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency),
 ): void {
   server.registerTool(
     'system.info',
@@ -95,7 +99,7 @@ export function registerTools(
       }),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async () => run('system.info', async () => ({
+    async (_args, ctx) => run('system.info', concurrency, ctx.mcpReq.signal, async () => ({
       ...(await adapter.systemInfo()),
       capabilities: {
         filesystemRead: config.filesystem.read,
@@ -124,7 +128,7 @@ export function registerTools(
         outputSchema: z.object({ path: z.string(), entries: z.array(fileEntrySchema) }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ path }) => run('fs.list', async () => ({ path, entries: [...await adapter.listDirectory(path)] })),
+      async ({ path }, ctx) => run('fs.list', concurrency, ctx.mcpReq.signal, async () => ({ path, entries: [...await adapter.listDirectory(path)] })),
     );
 
     server.registerTool(
@@ -136,7 +140,7 @@ export function registerTools(
         outputSchema: z.object({ path: z.string(), content: z.string(), bytes: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ path, maxBytes }) => run('fs.read', async () => {
+      async ({ path, maxBytes }, ctx) => run('fs.read', concurrency, ctx.mcpReq.signal, async () => {
         const content = await adapter.readFile(path, maxBytes);
         return { path, content, bytes: Buffer.byteLength(content, 'utf8') };
       }),
@@ -157,7 +161,7 @@ export function registerTools(
         outputSchema: z.object({ path: z.string(), mode: z.enum(['create', 'overwrite', 'append']), bytes: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ path, content, mode }) => run('fs.write', async () => {
+      async ({ path, content, mode }, ctx) => run('fs.write', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.writeFile(path, content, mode);
         return { path, mode, bytes: Buffer.byteLength(content, 'utf8') };
       }),
@@ -172,7 +176,7 @@ export function registerTools(
         outputSchema: z.object({ path: z.string(), recursive: z.boolean() }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       },
-      async ({ path, recursive }) => run('fs.mkdir', async () => {
+      async ({ path, recursive }, ctx) => run('fs.mkdir', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.makeDirectory(path, recursive);
         return { path, recursive };
       }),
@@ -187,7 +191,7 @@ export function registerTools(
         outputSchema: z.object({ source: z.string(), destination: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ source, destination }) => run('fs.move', async () => {
+      async ({ source, destination }, ctx) => run('fs.move', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.movePath(source, destination);
         return { source, destination };
       }),
@@ -202,7 +206,7 @@ export function registerTools(
         outputSchema: z.object({ path: z.string(), recursive: z.boolean() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ path, recursive }) => run('fs.delete', async () => {
+      async ({ path, recursive }, ctx) => run('fs.delete', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.deletePath(path, recursive);
         return { path, recursive };
       }),
@@ -227,12 +231,13 @@ export function registerTools(
         }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       },
-      async args => run('shell.exec', async () => ({ ...await adapter.exec({
+      async (args, ctx) => run('shell.exec', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.exec({
         command: args.command,
         args: args.args,
         ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
         ...(args.env === undefined ? {} : { env: args.env }),
         ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
+        signal: ctx.mcpReq.signal,
       }) })),
     );
   }
@@ -247,7 +252,7 @@ export function registerTools(
         outputSchema: z.object({ processes: z.array(processSchema) }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async () => run('process.list', async () => ({ processes: [...await adapter.listProcesses()] })),
+      async (_args, ctx) => run('process.list', concurrency, ctx.mcpReq.signal, async () => ({ processes: [...await adapter.listProcesses()] })),
     );
   }
 
@@ -261,7 +266,7 @@ export function registerTools(
         outputSchema: z.object({ pid: z.number().int().positive(), signal: signalSchema }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ pid, signal }) => run('process.kill', async () => {
+      async ({ pid, signal }, ctx) => run('process.kill', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.killProcess(pid, signal as NodeJS.Signals);
         return { pid, signal };
       }),
@@ -278,7 +283,7 @@ export function registerTools(
         outputSchema: z.object({ name: z.string(), activeState: z.string(), subState: z.string(), description: z.string() }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ name }) => run('service.status', async () => ({ ...await adapter.serviceStatus(name) })),
+      async ({ name }, ctx) => run('service.status', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.serviceStatus(name) })),
     );
 
     server.registerTool(
@@ -290,7 +295,7 @@ export function registerTools(
         outputSchema: z.object({ name: z.string(), action: serviceActionSchema }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ name, action }) => run('service.control', async () => {
+      async ({ name, action }, ctx) => run('service.control', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.serviceControl(name, action);
         return { name, action };
       }),
@@ -307,7 +312,7 @@ export function registerTools(
         outputSchema: z.object({ handle: z.string().min(1), pid: z.number().int().positive() }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ name, args }) => run('app.launch', async () => ({ ...await adapter.launchApplication(name, args) })),
+      async ({ name, args }, ctx) => run('app.launch', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.launchApplication(name, args) })),
     );
 
     server.registerTool(
@@ -319,7 +324,7 @@ export function registerTools(
         outputSchema: z.object({ handle: z.string().min(1) }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ handle }) => run('app.close', async () => {
+      async ({ handle }, ctx) => run('app.close', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.closeApplication(handle);
         return { handle };
       }),
@@ -336,7 +341,7 @@ export function registerTools(
         outputSchema: z.object({ url: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ url }) => run('browser.open', async () => {
+      async ({ url }, ctx) => run('browser.open', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.openBrowser(url);
         return { url };
       }),
@@ -353,9 +358,9 @@ export function registerTools(
         outputSchema: z.object({ mimeType: z.literal('image/png'), bytes: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async (): Promise<CallToolResult> => {
+      async (_args, ctx): Promise<CallToolResult> => {
         try {
-          const capture = await adapter.captureScreen();
+          const capture = await concurrency.run('screen.capture', () => adapter.captureScreen(), ctx.mcpReq.signal);
           return enforceTransportBudget({
             content: [
               { type: 'text', text: JSON.stringify({ mimeType: capture.mimeType, bytes: capture.bytes }) },
@@ -380,7 +385,7 @@ export function registerTools(
         outputSchema: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async ({ x, y }) => run('input.move', async () => {
+      async ({ x, y }, ctx) => run('input.move', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.movePointer(x, y);
         return { x, y };
       }),
@@ -399,7 +404,7 @@ export function registerTools(
         outputSchema: z.object({ button: pointerButtonSchema, x: z.number().int().nonnegative().optional(), y: z.number().int().nonnegative().optional() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ button, x, y }) => run('input.click', async () => {
+      async ({ button, x, y }, ctx) => run('input.click', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.clickPointer(button, x, y);
         return { button, ...(x === undefined ? {} : { x }), ...(y === undefined ? {} : { y }) };
       }),
@@ -414,7 +419,7 @@ export function registerTools(
         outputSchema: z.object({ bytes: z.number().int().nonnegative(), delayMs: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ text, delayMs }) => run('input.type', async () => {
+      async ({ text, delayMs }, ctx) => run('input.type', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.typeText(text, delayMs);
         return { bytes: Buffer.byteLength(text, 'utf8'), delayMs };
       }),
@@ -429,7 +434,7 @@ export function registerTools(
         outputSchema: z.object({ key: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ key }) => run('input.key', async () => {
+      async ({ key }, ctx) => run('input.key', concurrency, ctx.mcpReq.signal, async () => {
         await adapter.pressKey(key);
         return { key };
       }),

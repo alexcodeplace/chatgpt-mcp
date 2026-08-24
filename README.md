@@ -287,6 +287,22 @@ curl http://127.0.0.1:3210/healthz
 
 HTTP remains stateless. A non-loopback bind is rejected unless allowed hosts are explicitly configured.
 
+### Concurrency and overload protection
+
+The HTTP backend uses one process-wide admission controller shared by every stateless MCP request. The default policy allows 48 active tool operations, reserves 8 slots for control/observability work, limits `shell.exec` to 8 active commands, and bounds the waiting queue at 64 requests for at most 30 seconds. When the queue is full or a queue wait expires, the tool returns `OVERLOADED` locally instead of allowing resource growth to destabilize the backend or tunnel. MCP cancellation removes queued work; cancellation, timeout, and output-limit termination for `shell.exec` kill the complete POSIX process group.
+
+The defaults can be changed through the `concurrency` object in the JSON configuration. Keep `reservedControlSlots < maxConcurrent` and `shellMaxConcurrent <= maxConcurrent - reservedControlSlots`.
+
+Operational endpoints:
+
+```text
+GET /healthz  process liveness; remains healthy while busy
+GET /readyz   capacity state; returns 503 only when the admission queue is full
+GET /metrics  JSON limits, active/queued counts, peaks, and overload/cancellation counters
+```
+
+The installer also applies conservative systemd containment to the shared backend (`TasksMax=512`, `LimitNOFILE=65536`, `MemoryHigh=6G`, `MemoryMax=9G`, `CPUWeight=80`). These are last-resort host guardrails; normal overload should be handled by admission control first. The tunnel watchdog intentionally checks `/healthz`, not `/readyz`, so a healthy busy server is never restarted merely for being saturated.
+
 ## Trust boundary
 
 - Filesystem operations pass through central path authorization that rejects traversal, sibling-prefix tricks, and symlink escapes.

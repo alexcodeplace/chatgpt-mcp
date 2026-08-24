@@ -6,6 +6,8 @@ export const errorCodes = [
   'NOT_FOUND',
   'TIMEOUT',
   'OUTPUT_LIMIT',
+  'OVERLOADED',
+  'CANCELLED',
   'OS_ERROR',
 ] as const;
 

@@ -151,7 +151,10 @@ test('shell tool delegates argument-array execution unchanged', async () => {
   try {
     const result = await client.callTool({ name: 'shell.exec', arguments: { command: 'node', args: ['--version'], timeoutMs: 100 } });
     assert.equal(result.isError, undefined);
-    assert.deepEqual(seen, { command: 'node', args: ['--version'], timeoutMs: 100 });
+    assert.equal(typeof seen, 'object');
+    const request = seen as { command: string; args: string[]; timeoutMs: number; signal?: AbortSignal };
+    assert.deepEqual({ command: request.command, args: request.args, timeoutMs: request.timeoutMs }, { command: 'node', args: ['--version'], timeoutMs: 100 });
+    assert.ok(request.signal instanceof AbortSignal);
   } finally {
     await client.close();
     await server.close();

@@ -12,6 +12,7 @@ import {
 import type { ComputerAdapter } from './adapter/computer-adapter.js';
 import { LocalComputerAdapter } from './adapter/local-computer-adapter.js';
 import type { ChatGptMcpConfig } from './config.js';
+import { ConcurrencyController } from './concurrency.js';
 import { createComputerMcpServerFactory } from './server.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
@@ -86,8 +87,9 @@ function validators(config: Readonly<ChatGptMcpConfig>): {
 export function createComputerHttpServer(
   config: Readonly<ChatGptMcpConfig>,
   adapter: ComputerAdapter = new LocalComputerAdapter(config),
+  concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency),
 ): { server: NodeHttpServer; closeHandler(): Promise<void> } {
-  const handler = createMcpHandler(createComputerMcpServerFactory(config, adapter), {
+  const handler = createMcpHandler(createComputerMcpServerFactory(config, adapter, concurrency), {
     legacy: 'stateless',
     responseMode: 'json',
   });
@@ -104,6 +106,21 @@ export function createComputerHttpServer(
         return;
       }
       writeJson(res, 200, { ok: true, service: '@platform-modules/chatgpt-mcp' });
+      return;
+    }
+
+    if (pathname === '/readyz' || pathname === '/metrics') {
+      if (req.method !== 'GET') {
+        writeJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+        return;
+      }
+      const snapshot = concurrency.snapshot();
+      if (pathname === '/readyz') {
+        const ready = snapshot.status !== 'overloaded';
+        writeJson(res, ready ? 200 : 503, { ok: ready, service: '@platform-modules/chatgpt-mcp', concurrency: snapshot });
+      } else {
+        writeJson(res, 200, { service: '@platform-modules/chatgpt-mcp', concurrency: snapshot });
+      }
       return;
     }
 

@@ -1,4 +1,11 @@
 {
+  "concurrency": {
+    "maxConcurrent": 48,
+    "reservedControlSlots": 8,
+    "shellMaxConcurrent": 8,
+    "maxQueue": 64,
+    "queueTimeoutMs": 30000
+  },
   "http": {
     "host": "127.0.0.1",
     "port": 3210,
@@ -8,13 +15,23 @@
   "filesystem": {
     "read": true,
     "write": true,
-    "roots": ["/home/YOU/projects", "/home/YOU/Downloads"],
+    "roots": [
+      "/home/YOU/projects",
+      "/home/YOU/Downloads"
+    ],
     "maxReadBytes": 1048576,
     "maxWriteBytes": 4194304
   },
   "shell": {
     "enabled": true,
-    "allowedCommands": ["git", "node", "pnpm", "npm", "python3", "bash"],
+    "allowedCommands": [
+      "git",
+      "node",
+      "pnpm",
+      "npm",
+      "python3",
+      "bash"
+    ],
     "maxRuntimeMs": 120000,
     "maxOutputBytes": 4194304,
     "allowEnvironment": false
@@ -25,7 +42,10 @@
   },
   "service": {
     "enabled": false,
-    "allowedServices": ["nginx.service", "docker.service"],
+    "allowedServices": [
+      "nginx.service",
+      "docker.service"
+    ],
     "command": "systemctl",
     "maxRuntimeMs": 30000
   },
@@ -48,7 +68,10 @@
   "browser": {
     "enabled": false,
     "command": "xdg-open",
-    "allowedSchemes": ["http", "https"],
+    "allowedSchemes": [
+      "http",
+      "https"
+    ],
     "maxRuntimeMs": 30000
   },
   "desktop": {

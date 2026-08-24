@@ -59,6 +59,22 @@ const desktopSchema = z.object({
   maxTextBytes: z.number().int().positive().max(1024 * 1024).default(64 * 1024),
 });
 
+
+const concurrencySchema = z.object({
+  maxConcurrent: z.number().int().min(2).max(1024).default(48),
+  reservedControlSlots: z.number().int().min(0).max(1023).default(8),
+  shellMaxConcurrent: z.number().int().positive().max(1024).default(8),
+  maxQueue: z.number().int().positive().max(4096).default(64),
+  queueTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
+}).superRefine((value, ctx) => {
+  if (value.reservedControlSlots >= value.maxConcurrent) {
+    ctx.addIssue({ code: 'custom', path: ['reservedControlSlots'], message: 'reservedControlSlots must be less than maxConcurrent' });
+  }
+  if (value.shellMaxConcurrent > value.maxConcurrent - value.reservedControlSlots) {
+    ctx.addIssue({ code: 'custom', path: ['shellMaxConcurrent'], message: 'shellMaxConcurrent must fit inside non-control concurrency capacity' });
+  }
+});
+
 const httpSchema = z.object({
   host: z.string().min(1).default('127.0.0.1'),
   port: z.number().int().min(1).max(65535).default(3210),
@@ -68,6 +84,7 @@ const httpSchema = z.object({
 });
 
 const configSchema = z.object({
+  concurrency: concurrencySchema.default({ maxConcurrent: 48, reservedControlSlots: 8, shellMaxConcurrent: 8, maxQueue: 64, queueTimeoutMs: 30_000 }),
   http: httpSchema.default({ host: '127.0.0.1', port: 3210, allowedHosts: [], allowedOrigins: [] }),
   filesystem: filesystemSchema.default({ read: false, write: false, roots: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
   shell: shellSchema.default({ enabled: false, allowedCommands: [], maxRuntimeMs: 120_000, maxOutputBytes: 4 * 1024 * 1024, allowEnvironment: false }),

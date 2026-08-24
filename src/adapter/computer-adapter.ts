@@ -22,6 +22,7 @@ export interface ExecRequest {
   cwd?: string;
   env?: Readonly<Record<string, string>>;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface ExecResult {

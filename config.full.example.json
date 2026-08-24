@@ -1,4 +1,11 @@
 {
+  "concurrency": {
+    "maxConcurrent": 48,
+    "reservedControlSlots": 8,
+    "shellMaxConcurrent": 8,
+    "maxQueue": 64,
+    "queueTimeoutMs": 30000
+  },
   "http": {
     "host": "127.0.0.1",
     "port": 3210,
@@ -8,13 +15,17 @@
   "filesystem": {
     "read": true,
     "write": true,
-    "roots": ["/"],
+    "roots": [
+      "/"
+    ],
     "maxReadBytes": 4194304,
     "maxWriteBytes": 4194304
   },
   "shell": {
     "enabled": true,
-    "allowedCommands": ["*"],
+    "allowedCommands": [
+      "*"
+    ],
     "maxRuntimeMs": 600000,
     "maxOutputBytes": 4194304,
     "allowEnvironment": true
@@ -25,7 +36,9 @@
   },
   "service": {
     "enabled": true,
-    "allowedServices": ["*"],
+    "allowedServices": [
+      "*"
+    ],
     "command": "systemctl",
     "maxRuntimeMs": 30000
   },
@@ -48,7 +61,10 @@
   "browser": {
     "enabled": true,
     "command": "xdg-open",
-    "allowedSchemes": ["http", "https"],
+    "allowedSchemes": [
+      "http",
+      "https"
+    ],
     "maxRuntimeMs": 30000
   },
   "desktop": {

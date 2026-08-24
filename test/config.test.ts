@@ -7,6 +7,11 @@ import { loadConfig, parseConfig } from '../src/config.js';
 
 test('safe defaults expose no action capability authority', () => {
   const config = parseConfig({});
+  assert.equal(config.concurrency.maxConcurrent, 48);
+  assert.equal(config.concurrency.reservedControlSlots, 8);
+  assert.equal(config.concurrency.shellMaxConcurrent, 8);
+  assert.equal(config.concurrency.maxQueue, 64);
+  assert.equal(config.concurrency.queueTimeoutMs, 30_000);
   assert.equal(config.http.host, '127.0.0.1');
   assert.equal(config.http.port, 3210);
   assert.deepEqual(config.http.allowedHosts, []);
@@ -79,4 +84,6 @@ test('malformed configuration fails closed', () => {
   assert.throws(() => parseConfig({ http: { port: 70000 } }));
   assert.throws(() => parseConfig({ browser: { allowedSchemes: ['not a scheme'] } }));
   assert.throws(() => parseConfig({ application: { maxTracked: 0 } }));
+  assert.throws(() => parseConfig({ concurrency: { maxConcurrent: 8, reservedControlSlots: 8 } }));
+  assert.throws(() => parseConfig({ concurrency: { maxConcurrent: 8, reservedControlSlots: 2, shellMaxConcurrent: 7 } }));
 });

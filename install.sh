@@ -321,6 +321,11 @@ Environment=CHATGPT_MCP_NODE_BIN=$(command -v node)
 ExecStart=$USER_LIB/run-mcp-http.sh
 Restart=always
 RestartSec=1
+TasksMax=512
+LimitNOFILE=65536
+MemoryHigh=6G
+MemoryMax=9G
+CPUWeight=80
 
 [Install]
 WantedBy=default.target

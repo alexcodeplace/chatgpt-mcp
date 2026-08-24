@@ -100,17 +100,24 @@ type CaptureOptions = {
   timeoutMs: number;
   maxOutputBytes: number;
   operation: string;
+  signal?: AbortSignal;
 };
 
 function spawnBounded(command: string, args: readonly string[], options: CaptureOptions): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(adapterError('CANCELLED', options.operation, 'Request was cancelled before process spawn.'));
+      return;
+    }
     const started = process.hrtime.bigint();
+    const useProcessGroup = platform() !== 'win32';
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(command, [...args], {
         cwd: options.cwd,
         env: options.env ?? process.env,
         shell: false,
+        detached: useProcessGroup,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (error) {
@@ -122,17 +129,35 @@ function spawnBounded(command: string, args: readonly string[], options: Capture
     let outputBytes = 0;
     let timedOut = false;
     let outputExceeded = false;
+    let cancelled = false;
     let spawnError: unknown;
     let closed = false;
 
-    const terminate = (): void => {
+    const signalProcess = (signal: NodeJS.Signals): void => {
       if (child.exitCode !== null || child.signalCode !== null) return;
-      child.kill('SIGTERM');
-      const forceTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      }, FORCE_KILL_DELAY_MS);
+      if (useProcessGroup && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill(signal);
+          return;
+        }
+      }
+      child.kill(signal);
+    };
+
+    const terminate = (): void => {
+      signalProcess('SIGTERM');
+      const forceTimer = setTimeout(() => signalProcess('SIGKILL'), FORCE_KILL_DELAY_MS);
       forceTimer.unref();
     };
+
+    const abortHandler = (): void => {
+      cancelled = true;
+      terminate();
+    };
+    options.signal?.addEventListener('abort', abortHandler, { once: true });
 
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -160,7 +185,12 @@ function spawnBounded(command: string, args: readonly string[], options: Capture
       if (closed) return;
       closed = true;
       clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abortHandler);
       const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+      if (cancelled) {
+        reject(adapterError('CANCELLED', options.operation, 'Request was cancelled during command execution.'));
+        return;
+      }
       if (outputExceeded) {
         reject(adapterError('OUTPUT_LIMIT', options.operation, 'Command output exceeded the configured byte limit.', {
           maximum: options.maxOutputBytes,
@@ -361,6 +391,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
       ...(env === undefined ? {} : { env }),
       timeoutMs: clampRuntime(request.timeoutMs, this.config.shell.maxRuntimeMs),
       maxOutputBytes: this.config.shell.maxOutputBytes,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
       operation,
     });
   }
