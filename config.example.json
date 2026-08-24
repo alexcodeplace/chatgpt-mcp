@@ -22,7 +22,8 @@
         "mode": "snapshot",
         "containerPath": "/workspace",
         "exclude": [],
-        "maxArchiveBytes": 2147483648
+        "maxArchiveBytes": 2147483648,
+        "prepareCommands": []
       },
       "resources": {
         "requests": {},
@@ -37,7 +38,11 @@
       "ttlSeconds": 300,
       "requiredCommands": [],
       "requiredEnvironment": {},
-      "versionChecks": {}
+      "versionChecks": {},
+      "idleCommand": [
+        "sleep",
+        "infinity"
+      ]
     }
   },
   "concurrency": {

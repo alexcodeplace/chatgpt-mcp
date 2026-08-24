@@ -152,3 +152,48 @@ test('invalid Kubernetes heavy routing regular expressions fail closed', () => {
     /valid regular expression/,
   );
 });
+
+
+test('Kubernetes workspace volume name and mount path are reserved', () => {
+  assert.throws(
+    () => parseConfig({ execution: { kubernetes: { volumes: [{ name: 'chatgpt-mcp-workspace', emptyDir: {} }] } } }),
+    /reserved for the isolated executor workspace/,
+  );
+  assert.throws(
+    () => parseConfig({ execution: { kubernetes: { workspace: { containerPath: '/workspace' }, volumeMounts: [{ name: 'x', mountPath: '/workspace' }] } } }),
+    /workspace path is reserved/,
+  );
+});
+
+
+test('Kubernetes workspace preparation commands are opt-in argument arrays', () => {
+  const config = parseConfig({ execution: { kubernetes: { workspace: { prepareCommands: [{ command: 'corepack', args: ['pnpm', 'install', '--frozen-lockfile'], whenFiles: ['pnpm-lock.yaml'], timeoutMs: 120000 }] } } } });
+  assert.deepEqual(config.execution.kubernetes.workspace.prepareCommands, [{ command: 'corepack', args: ['pnpm', 'install', '--frozen-lockfile'], whenFiles: ['pnpm-lock.yaml'], timeoutMs: 120000 }]);
+  assert.throws(() => parseConfig({ execution: { kubernetes: { workspace: { prepareCommands: [{ command: '/bin/sh', args: [] }] } } } }), /Invalid string/);
+});
+
+
+test('Kubernetes executor idle command is deployment-configurable without changing safe defaults', () => {
+  const defaults = parseConfig({});
+  assert.deepEqual(defaults.execution.kubernetes.idleCommand, ['sleep', 'infinity']);
+  const configured = parseConfig({ execution: { kubernetes: { idleCommand: ['/usr/bin/tini', '--', 'sleep', 'infinity'] } } });
+  assert.deepEqual(configured.execution.kubernetes.idleCommand, ['/usr/bin/tini', '--', 'sleep', 'infinity']);
+});
+
+
+test('Kubernetes required environment keys use portable environment-variable names', () => {
+  assert.throws(
+    () => parseConfig({ execution: { kubernetes: { requiredEnvironment: { 'BAD-NAME': 'value' } } } }),
+    /Invalid string/,
+  );
+  const config = parseConfig({ execution: { kubernetes: { requiredEnvironment: { COREPACK_HOME: '/workspace/.corepack' } } } });
+  assert.equal(config.execution.kubernetes.requiredEnvironment.COREPACK_HOME, '/workspace/.corepack');
+});
+
+
+test('Kubernetes preparation predicates reject workspace traversal', () => {
+  assert.throws(
+    () => parseConfig({ execution: { kubernetes: { workspace: { prepareCommands: [{ command: 'pnpm', whenFiles: ['../secret'] }] } } } }),
+    /prepare predicate paths must stay inside the workspace/,
+  );
+});

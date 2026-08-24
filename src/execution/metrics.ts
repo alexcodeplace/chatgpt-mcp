@@ -2,7 +2,7 @@ export interface ExecutionMetricsSnapshot {
   routing: { local: number; remote: number; forcedLocal: number; remoteErrors: number };
   outputBytes: { local: number; remote: number };
   durationMs: { localTotal: number; remoteTotal: number; localPeak: number; remotePeak: number };
-  kubernetes: { podsCreated: number; podsStarted: number; commandsCompleted: number; cleanupSucceeded: number; cleanupFailed: number };
+  kubernetes: { podsCreated: number; podsStarted: number; commandsCompleted: number; cleanupSucceeded: number; cleanupFailed: number; orphansReaped: number };
 }
 
 export class ExecutionMetrics {
@@ -21,6 +21,7 @@ export class ExecutionMetrics {
   private commandsCompleted = 0;
   private cleanupSucceeded = 0;
   private cleanupFailed = 0;
+  private orphansReaped = 0;
 
   recordRoute(route: 'local' | 'remote' | 'forced-local'): void {
     if (route === 'local') this.local += 1;
@@ -45,6 +46,7 @@ export class ExecutionMetrics {
   podStarted(): void { this.podsStarted += 1; }
   commandCompleted(): void { this.commandsCompleted += 1; }
   cleanup(ok: boolean): void { if (ok) this.cleanupSucceeded += 1; else this.cleanupFailed += 1; }
+  orphanReaped(): void { this.orphansReaped += 1; }
 
   snapshot(): ExecutionMetricsSnapshot {
     return {
@@ -56,7 +58,7 @@ export class ExecutionMetrics {
       },
       kubernetes: {
         podsCreated: this.podsCreated, podsStarted: this.podsStarted, commandsCompleted: this.commandsCompleted,
-        cleanupSucceeded: this.cleanupSucceeded, cleanupFailed: this.cleanupFailed,
+        cleanupSucceeded: this.cleanupSucceeded, cleanupFailed: this.cleanupFailed, orphansReaped: this.orphansReaped,
       },
     };
   }

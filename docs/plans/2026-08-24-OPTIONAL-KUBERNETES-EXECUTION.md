@@ -133,6 +133,26 @@ Start a candidate backend on an alternate local port. Compare candidate vs curre
 
 Any drift blocks cutover.
 
+## Pre-cutover verified status — 2026-08-24
+
+The generic implementation and private deployment candidate have passed the pre-cutover gates:
+
+- public/default configuration remains local-only; Kubernetes is disabled unless explicitly configured
+- no private cluster address, Tailscale node, namespace, registry, or deployment image is encoded in public runtime/default configuration
+- full generic gate: 95/95 tests, TypeScript no-emit, compile, shell/install checks, and diff checks passed on a buildbox
+- exact production/candidate MCP tool-name/schema parity passed
+- exact `system.info` capability parity passed
+- all pre-existing production configuration fields match the candidate after excluding the candidate-only `execution` section and alternate HTTP port
+- real workspace snapshot preserves uncommitted files and executes from `/workspace`
+- dependency preparation is opt-in, argv-based, and may be guarded by safe relative `whenFiles` predicates
+- real remote project suite passed through MCP on the private executor image
+- cancellation, runtime timeout, output overflow, stale-orphan reaping, and pod cleanup passed in the live cluster
+- remote admission reached 12 active + 3 queued with zero local-shell slots consumed; a short saturation run completed all 15 calls successfully
+- reserved `system.info` completed in ~25 ms while the remote shell pool was saturated
+- Kubernetes scheduled live executor jobs across recovered worker nodes without hard-coded runtime node selection
+- the private executor image is held by a minimal warm DaemonSet and its exact manifest is present on all three K3s workers
+- `debian3` later entered Kubernetes DiskPressure due unrelated concurrent rootless-build activity; the backend does not tolerate/bypass that safety taint and normal scheduling is restored so healthy nodes remain available
+
 ## Phase 11 — first cutover: `overdeck-vm` only
 
 - Preserve current `Overdeck` tunnel -> stable backend.

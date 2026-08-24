@@ -227,3 +227,7 @@ No production tunnel is moved until all unit/integration/cluster gates pass. Rol
 9. Never arm overlapping rollback timers.
 
 The backend itself remains locally available for host-sensitive tools; Kubernetes is the optional heavy-shell executor. This preserves existing computer-control semantics while removing heavy compute from the MCP host.
+
+Remote workspace configuration may define `prepareCommands` as trusted executable-plus-argument arrays. They default to empty and run inside the isolated pod after snapshot/parity checks. Each preparation command may include `whenFiles`, a list of relative workspace paths that must all exist before that command runs. This lets deployments restore project dependencies only for matching workspaces, without shell interpretation, path traversal, or changing public local-only defaults.
+
+The optional Kubernetes backend also exposes `idleCommand` as a deployment configuration array (default `['sleep', 'infinity']`). Deployments that require an init/reaper process may configure an explicit argument array such as `['/usr/bin/tini', '--', 'sleep', 'infinity']`; no shell interpolation is used.
