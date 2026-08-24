@@ -6,6 +6,9 @@ PROFILE_NAME="${CHATGPT_MCP_PROFILE:-chatgpt-computer}"
 TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel-${PROFILE_NAME}.service"
 LEGACY_TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel.service"
 MCP_SERVICE_NAME="chatgpt-mcp.service"
+WATCHDOG_TIMER_NAME="chatgpt-mcp-watchdog-${PROFILE_NAME}.timer"
+PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tunnel-client"
+PROFILE_FILE="$PROFILE_DIR/$PROFILE_NAME.yaml"
 API_FILE="$REPO/.secrets/runtime-api-key"
 
 [[ "$PROFILE_NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Invalid CHATGPT_MCP_PROFILE: $PROFILE_NAME" >&2; exit 2; }
@@ -59,6 +62,21 @@ else
   echo NOT_ACTIVE
 fi
 systemctl --user status "$ACTIVE_TUNNEL_SERVICE" --no-pager --lines=15 || true
+
+printf '\nTunnel readiness: '
+HEALTH_ADDR="$(sed -nE 's/^[[:space:]]*listen_addr:[[:space:]]*"(127\.0\.0\.1:[0-9]+)".*/\1/p' "$PROFILE_FILE" 2>/dev/null | head -n1)"
+if [[ -n "$HEALTH_ADDR" ]] && curl -fsS --max-time 2 "http://$HEALTH_ADDR/readyz" >/dev/null 2>&1; then
+  echo OK
+else
+  echo FAILED
+fi
+
+printf '\nWatchdog timer (%s): ' "$WATCHDOG_TIMER_NAME"
+if systemctl --user is-active --quiet "$WATCHDOG_TIMER_NAME"; then
+  echo ACTIVE
+else
+  echo NOT_ACTIVE
+fi
 
 if [[ -r "$API_FILE" ]]; then
   export CONTROL_PLANE_API_KEY="$(read_secret "$API_FILE")"

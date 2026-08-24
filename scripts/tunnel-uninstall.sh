@@ -4,14 +4,20 @@ set -Eeuo pipefail
 PROFILE_NAME="${CHATGPT_MCP_PROFILE:-chatgpt-computer}"
 TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel-${PROFILE_NAME}.service"
 LEGACY_TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel.service"
+WATCHDOG_SERVICE_NAME="chatgpt-mcp-watchdog-${PROFILE_NAME}.service"
+WATCHDOG_TIMER_NAME="chatgpt-mcp-watchdog-${PROFILE_NAME}.timer"
+USER_LIB="$HOME/.local/lib/chatgpt-mcp"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tunnel-client"
 PROFILE_FILE="$PROFILE_DIR/$PROFILE_NAME.yaml"
 
 [[ "$PROFILE_NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Invalid CHATGPT_MCP_PROFILE: $PROFILE_NAME" >&2; exit 2; }
 
+systemctl --user disable --now "$WATCHDOG_TIMER_NAME" 2>/dev/null || true
+systemctl --user stop "$WATCHDOG_SERVICE_NAME" 2>/dev/null || true
 systemctl --user disable --now "$TUNNEL_SERVICE_NAME" 2>/dev/null || true
-rm -f "$SYSTEMD_DIR/$TUNNEL_SERVICE_NAME"
+rm -f "$SYSTEMD_DIR/$WATCHDOG_TIMER_NAME" "$SYSTEMD_DIR/$WATCHDOG_SERVICE_NAME" "$SYSTEMD_DIR/$TUNNEL_SERVICE_NAME"
+rm -f "$USER_LIB/watchdog-$PROFILE_NAME.sh"
 
 if [[ -f "$SYSTEMD_DIR/$LEGACY_TUNNEL_SERVICE_NAME" ]] \
   && grep -Fqx "Environment=CHATGPT_MCP_PROFILE=$PROFILE_NAME" "$SYSTEMD_DIR/$LEGACY_TUNNEL_SERVICE_NAME"; then

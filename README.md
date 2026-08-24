@@ -147,7 +147,7 @@ The installer:
 - initializes the `chatgpt-computer` tunnel profile against `http://127.0.0.1:3210/mcp`;
 - installs a shared `chatgpt-mcp.service` HTTP backend with automatic restart;
 - installs a profile-specific `chatgpt-mcp-tunnel-<profile>.service`, so multiple tunnels are independently supervised;
-- uses an ephemeral loopback tunnel health port so concurrent profiles do not collide on port 8080;
+- assigns each profile its own loopback tunnel health port and installs a 15-second watchdog that repairs an unhealthy local backend or tunnel;
 - runs `tunnel-client doctor --explain` against the supervised HTTP backend;
 - verifies both services and the HTTP health endpoint.
 
@@ -175,7 +175,7 @@ First confirm the local tunnel is healthy:
 ./scripts/tunnel-status.sh
 ```
 
-You want to see `MCP HTTP service: ACTIVE`, `MCP HTTP health: OK`, the profile-specific tunnel service as `ACTIVE`, and `RESULT ok` from `tunnel-client doctor`.
+You want to see `MCP HTTP service: ACTIVE`, `MCP HTTP health: OK`, `Tunnel readiness: OK`, the profile-specific tunnel service and watchdog timer as `ACTIVE`, and `RESULT ok` from `tunnel-client doctor`.
 
 Then, in **ChatGPT web**:
 

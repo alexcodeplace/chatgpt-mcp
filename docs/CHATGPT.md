@@ -32,7 +32,7 @@ cd chatgpt-mcp
 ./install.sh
 ```
 
-The installer asks for the credentials with the API key hidden, builds/tests the server, installs `tunnel-client` if needed, starts a supervised loopback HTTP MCP backend, initializes the tunnel profile against that backend, and creates an independently supervised systemd tunnel service for the profile.
+The installer asks for credentials with the API key hidden, builds/tests the server, installs `tunnel-client` if needed, starts a supervised loopback HTTP MCP backend, initializes the tunnel profile against that backend, creates an independently supervised systemd tunnel service for the profile, and enables a health watchdog that can repair an unhealthy local MCP backend or tunnel.
 
 Check it later with:
 
