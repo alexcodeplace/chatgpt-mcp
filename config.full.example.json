@@ -9,14 +9,14 @@
     "read": true,
     "write": true,
     "roots": ["/"],
-    "maxReadBytes": 16777216,
-    "maxWriteBytes": 16777216
+    "maxReadBytes": 4194304,
+    "maxWriteBytes": 4194304
   },
   "shell": {
     "enabled": true,
     "allowedCommands": ["*"],
     "maxRuntimeMs": 600000,
-    "maxOutputBytes": 16777216,
+    "maxOutputBytes": 4194304,
     "allowEnvironment": true
   },
   "process": {
@@ -57,7 +57,7 @@
     "input": true,
     "screenBackend": "auto",
     "inputBackend": "xdotool",
-    "maxImageBytes": 10485760,
+    "maxImageBytes": 4194304,
     "maxTextBytes": 65536
   },
   "logLevel": "info"

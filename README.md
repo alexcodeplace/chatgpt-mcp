@@ -211,6 +211,7 @@ Use ChatGPT-MCP to list my Projects directory. Do not modify anything.
 - **`does not implement OAuth`**: set **Authentication** to **No Auth**.
 - **Tunnel not listed**: verify the tunnel is associated with the ChatGPT workspace/account you are using and that the relevant Platform principal has **Tunnels Read + Use**.
 - **Generic `Error creating connector`**: first confirm `./scripts/tunnel-status.sh` still reports `ACTIVE` and `RESULT ok`, then retry creation using the exact plugin name **`ChatGPT-MCP`** and **No Auth**.
+- **`OUTPUT_LIMIT` on a very large command/file/image result**: this is intentional. Tool responses are kept below a transport-safe budget so OpenAI Tunnel does not turn an oversized response into an opaque HTTP 413/connector failure. Split large reads or command output into smaller chunks.
 
 OpenAI changes the ChatGPT plugin/app UI over time. The current OpenAI developer-mode guidance is linked under [Upstream references](#upstream-references).
 
@@ -222,7 +223,7 @@ OpenAI changes the ChatGPT plugin/app UI over time. The current OpenAI developer
 
 The status command loads the saved runtime key itself and uses an ephemeral health listener, so you do not need to export `CONTROL_PLANE_API_KEY` manually just to run diagnostics.
 
-Remove the persistent user service while leaving local config/secrets intact:
+Remove one profile-specific tunnel service and watchdog while leaving the shared MCP backend and local config/secrets intact:
 
 ```sh
 ./scripts/tunnel-uninstall.sh

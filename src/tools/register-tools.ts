@@ -2,7 +2,7 @@ import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { ComputerAdapter } from '../adapter/computer-adapter.js';
 import type { ChatGptMcpConfig } from '../config.js';
-import { isComputerAdapterError } from '../errors.js';
+import { adapterError, isComputerAdapterError } from '../errors.js';
 
 const pathInput = z.string().min(1);
 const signalSchema = z.enum([
@@ -13,6 +13,7 @@ const signalSchema = z.enum([
 ]);
 const serviceActionSchema = z.enum(['start', 'stop', 'restart']);
 const pointerButtonSchema = z.enum(['left', 'middle', 'right']);
+const MAX_TOOL_RESPONSE_BYTES = 6 * 1024 * 1024;
 
 const fileEntrySchema = z.object({
   name: z.string(),
@@ -31,7 +32,9 @@ const processSchema = z.object({
 
 function success(structuredContent: Record<string, unknown>, message?: string): CallToolResult {
   return {
-    content: [{ type: 'text', text: message ?? JSON.stringify(structuredContent) }],
+    // structuredContent is the canonical machine-readable result. Keep the text
+    // part compact so large stdout/file results are not duplicated on the wire.
+    content: [{ type: 'text', text: message ?? 'ok' }],
     structuredContent,
   };
 }
@@ -43,6 +46,20 @@ function failure(error: unknown, operation: string): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify({ error: body }) }], isError: true };
 }
 
+function enforceTransportBudget(result: CallToolResult, operation: string): CallToolResult {
+  const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+  if (bytes <= MAX_TOOL_RESPONSE_BYTES) return result;
+  return failure(
+    adapterError(
+      'OUTPUT_LIMIT',
+      operation,
+      'Tool response exceeded the transport-safe byte limit.',
+      { maximum: MAX_TOOL_RESPONSE_BYTES, actual: bytes },
+    ),
+    operation,
+  );
+}
+
 async function run(
   operation: string,
   fn: () => Promise<Record<string, unknown>>,
@@ -50,7 +67,7 @@ async function run(
 ): Promise<CallToolResult> {
   try {
     const result = await fn();
-    return success(result, message?.(result));
+    return enforceTransportBudget(success(result, message?.(result)), operation);
   } catch (error) {
     return failure(error, operation);
   }
@@ -339,13 +356,13 @@ export function registerTools(
       async (): Promise<CallToolResult> => {
         try {
           const capture = await adapter.captureScreen();
-          return {
+          return enforceTransportBudget({
             content: [
               { type: 'text', text: JSON.stringify({ mimeType: capture.mimeType, bytes: capture.bytes }) },
               { type: 'image', data: capture.data, mimeType: capture.mimeType },
             ],
             structuredContent: { mimeType: capture.mimeType, bytes: capture.bytes },
-          };
+          }, 'screen.capture');
         } catch (error) {
           return failure(error, 'screen.capture');
         }

@@ -158,6 +158,44 @@ test('shell tool delegates argument-array execution unchanged', async () => {
   }
 });
 
+test('successful structured results are not duplicated into text content', async () => {
+  const adapter = fakeAdapter();
+  adapter.exec = async () => ({ exitCode: 0, stdout: 'payload', stderr: '', durationMs: 1, timedOut: false });
+  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['node'] } }, adapter);
+  try {
+    const result = await client.callTool({ name: 'shell.exec', arguments: { command: 'node' } });
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content[0]?.type === 'text' ? result.content[0].text : '', 'ok');
+    assert.equal((result.structuredContent as { stdout?: string } | undefined)?.stdout, 'payload');
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('oversized tool responses fail locally before the tunnel transport limit', async () => {
+  const adapter = fakeAdapter();
+  adapter.exec = async () => ({
+    exitCode: 0,
+    stdout: 'x'.repeat(7 * 1024 * 1024),
+    stderr: '',
+    durationMs: 1,
+    timedOut: false,
+  });
+  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['node'] } }, adapter);
+  try {
+    const result = await client.callTool({ name: 'shell.exec', arguments: { command: 'node' } });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent, undefined);
+    const first = result.content[0];
+    assert.match(first?.type === 'text' ? first.text : '', /OUTPUT_LIMIT/);
+    assert.ok(Buffer.byteLength(JSON.stringify(result), 'utf8') < 64 * 1024);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test('application launch returns an explicit handle and close consumes that handle', async () => {
   const calls: unknown[] = [];
   const adapter = fakeAdapter();
