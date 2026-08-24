@@ -141,6 +141,9 @@ export class KubernetesExecutor {
     let archiveBytes = 0;
     let stderr = '';
     let exceeded = false;
+    let transferTimedOut = false;
+    let processError: unknown;
+    let streamError: unknown;
     const kill = (child: ChildProcess): void => {
       if (child.exitCode !== null || child.signalCode !== null) return;
       if (process.platform !== 'win32' && child.pid !== undefined) {
@@ -149,7 +152,13 @@ export class KubernetesExecutor {
       child.kill('SIGTERM');
     };
     const abort = (): void => { kill(tar); kill(remote); };
+    const recordProcessError = (error: unknown): void => { processError ??= error; abort(); };
+    const recordStreamError = (error: unknown): void => { streamError ??= error; abort(); };
     signal?.addEventListener('abort', abort, { once: true });
+    tar.on('error', recordProcessError);
+    remote.on('error', recordProcessError);
+    tar.stdout.on('error', recordStreamError);
+    remote.stdin.on('error', recordStreamError);
     tar.stdout.on('data', (chunk: Buffer) => {
       archiveBytes += chunk.length;
       if (archiveBytes > this.config.workspace.maxArchiveBytes) {
@@ -160,7 +169,7 @@ export class KubernetesExecutor {
     remote.stderr.on('data', (chunk: Buffer) => { if (stderr.length < 8192) stderr += chunk.toString('utf8'); });
     tar.stderr.on('data', (chunk: Buffer) => { if (stderr.length < 8192) stderr += chunk.toString('utf8'); });
     tar.stdout.pipe(remote.stdin);
-    const timeout = setTimeout(abort, this.config.startupTimeoutMs);
+    const timeout = setTimeout(() => { transferTimedOut = true; abort(); }, this.config.startupTimeoutMs);
     timeout.unref();
     const [tarCode, remoteCode] = await Promise.all([
       new Promise<number | null>(resolve => tar.once('close', resolve)),
@@ -169,13 +178,20 @@ export class KubernetesExecutor {
     clearTimeout(timeout);
     signal?.removeEventListener('abort', abort);
     if (signal?.aborted) throw adapterError('CANCELLED', 'shell.exec.remote.workspace', 'Request was cancelled during workspace transfer.');
+    if (transferTimedOut) throw adapterError('TIMEOUT', 'shell.exec.remote.workspace', 'Workspace snapshot transfer timed out.');
     if (exceeded) {
       throw adapterError('OUTPUT_LIMIT', 'shell.exec.remote.workspace', 'Workspace snapshot exceeded the configured archive byte limit.', {
         maximum: this.config.workspace.maxArchiveBytes,
       });
     }
-    if (tarCode !== 0 || remoteCode !== 0) {
-      throw adapterError('OS_ERROR', 'shell.exec.remote.workspace', 'Workspace snapshot transfer failed.', { tarCode, remoteCode, stderr });
+    if (processError !== undefined || streamError !== undefined || tarCode !== 0 || remoteCode !== 0) {
+      const error = (processError ?? streamError) as NodeJS.ErrnoException | undefined;
+      throw adapterError('OS_ERROR', 'shell.exec.remote.workspace', 'Workspace snapshot transfer failed.', {
+        tarCode,
+        remoteCode,
+        stderr,
+        ...(typeof error?.code === 'string' ? { osCode: error.code } : {}),
+      });
     }
   }
 

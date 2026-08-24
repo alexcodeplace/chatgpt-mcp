@@ -54,3 +54,16 @@ test('bounded process cleans spool files after cancellation', async () => {
   const after = await spoolEntries();
   assert.deepEqual(after, before);
 });
+
+
+test('bounded process handles an early stdin close without an unhandled EPIPE', async () => {
+  await assert.rejects(
+    () => spawnBounded(process.execPath, ['-e', 'process.stdin.destroy(); setTimeout(()=>process.exit(0),50)'], {
+      timeoutMs: 10_000,
+      maxOutputBytes: 4096,
+      operation: 'test.stdin.epipe',
+      stdin: Buffer.alloc(8 * 1024 * 1024, 'x'),
+    }),
+    (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OS_ERROR',
+  );
+});

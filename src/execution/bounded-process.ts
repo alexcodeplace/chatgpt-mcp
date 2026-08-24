@@ -50,6 +50,7 @@ export async function spawnBounded(command: string, args: readonly string[], opt
   let outputExceeded = false;
   let cancelled = false;
   let spawnError: unknown;
+  let stdinError: unknown;
   let child: ReturnType<typeof spawn> | undefined;
 
   const endFile = (stream: typeof stdoutFile): Promise<void> => new Promise((resolve, reject) => {
@@ -115,8 +116,11 @@ export async function spawnBounded(command: string, args: readonly string[], opt
 
     child.stdout?.on('data', (chunk: Buffer) => collect(stdoutFile, child!.stdout!, chunk));
     child.stderr?.on('data', (chunk: Buffer) => collect(stderrFile, child!.stderr!, chunk));
-    child.on('error', error => { spawnError = error; });
-    if (options.stdin !== undefined) child.stdin?.end(options.stdin);
+    child.on('error', error => { spawnError ??= error; });
+    child.stdin?.on('error', error => { stdinError ??= error; });
+    if (options.stdin !== undefined) {
+      try { child.stdin?.end(options.stdin); } catch (error) { stdinError ??= error; }
+    }
 
     const exitCode = await new Promise<number | null>(resolve => child!.once('close', resolve));
     clearTimeout(timeout);
@@ -129,6 +133,7 @@ export async function spawnBounded(command: string, args: readonly string[], opt
       throw adapterError('OUTPUT_LIMIT', options.operation, 'Command output exceeded the configured byte limit.', { maximum: options.maxOutputBytes });
     }
     if (spawnError !== undefined) throw mapSpawnError(spawnError, options.operation, command);
+    if (stdinError !== undefined && exitCode === 0) throw mapSpawnError(stdinError, options.operation, command);
 
     const [stdout, stderr] = await Promise.all([readFile(stdoutPath, 'utf8'), readFile(stderrPath, 'utf8')]);
     return { exitCode, stdout, stderr, durationMs, timedOut };

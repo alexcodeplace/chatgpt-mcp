@@ -16,6 +16,12 @@ async function fakeClientFixture(mode = 'ok') {
   await writeFile(client, `#!/usr/bin/env node
 import { appendFileSync } from 'node:fs';
 const [log, mode, ...args] = process.argv.slice(2);
+const workspaceTransfer = args.includes('exec') && args.includes('-i') && args.includes('tar');
+if (mode === 'workspace-close' && workspaceTransfer) {
+  appendFileSync(log, JSON.stringify({ args, stdinBytes: 0, earlyClose: true }) + '\\n');
+  process.stdin.destroy();
+  process.exit(7);
+}
 let stdin = Buffer.alloc(0);
 for await (const chunk of process.stdin) stdin = Buffer.concat([stdin, Buffer.from(chunk)]);
 const record = { args, stdinBytes: stdin.length };
@@ -191,6 +197,25 @@ test('Kubernetes preparation commands skip when workspace predicates do not matc
     const records = await calls(fixture.log);
     const prepRuns = records.filter(record => record.args.includes('node') && record.args.includes('--version') && record.args.includes('exec'));
     assert.equal(prepRuns.length, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+
+test('Kubernetes workspace pipe closure is contained and cleanup still runs', async () => {
+  const fixture = await fakeClientFixture('workspace-close');
+  try {
+    await writeFile(join(fixture.root, 'large.bin'), Buffer.alloc(8 * 1024 * 1024, 'x'));
+    const config = configFor(fixture.client, fixture.log, 'workspace-close');
+    const executor = new KubernetesExecutor(config, new ExecutionMetrics());
+    await assert.rejects(
+      () => executor.exec({ command: 'node', args: ['-e', 'ignored'], cwd: fixture.root }, 5_000, 4096),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OS_ERROR',
+    );
+    const records = await calls(fixture.log);
+    assert.ok(records.some(record => record.args.includes('-i') && (record as { earlyClose?: boolean }).earlyClose === true));
+    assert.ok(records.some(record => record.args.includes('delete')));
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
