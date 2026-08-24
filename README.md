@@ -52,7 +52,7 @@ Core server:
 - Linux
 - Node.js 22+
 - pnpm **11.20.0** (the installer obtains the pinned version through Corepack or `npx`)
-- systemd user services for the persistent tunnel installed by `./install.sh`
+- systemd user services for the persistent MCP HTTP backend and tunnel profiles installed by `./install.sh`
 
 Optional host commands depend on what you enable:
 
@@ -76,9 +76,9 @@ OpenAI Secure MCP Tunnel
         v
 tunnel-client on your computer
         |
-        | stdio
+        | loopback HTTP
         v
-chatgpt-mcp
+systemd-supervised chatgpt-mcp
 ```
 
 No public inbound listener is required.
@@ -144,11 +144,12 @@ The installer:
 - creates `config.local.json` from the broad-control template;
 - installs the official OpenAI `tunnel-client` if missing on supported Linux architectures;
 - installs common desktop helpers on Debian/Ubuntu when needed;
-- initializes the `chatgpt-computer` tunnel profile;
-- uses an ephemeral loopback health port so an existing service on port 8080 does not block installation;
-- runs `tunnel-client doctor --explain`;
-- installs and starts `~/.config/systemd/user/chatgpt-mcp-tunnel.service`;
-- verifies the service and tunnel diagnostics.
+- initializes the `chatgpt-computer` tunnel profile against `http://127.0.0.1:3210/mcp`;
+- installs a shared `chatgpt-mcp.service` HTTP backend with automatic restart;
+- installs a profile-specific `chatgpt-mcp-tunnel-<profile>.service`, so multiple tunnels are independently supervised;
+- uses an ephemeral loopback tunnel health port so concurrent profiles do not collide on port 8080;
+- runs `tunnel-client doctor --explain` against the supervised HTTP backend;
+- verifies both services and the HTTP health endpoint.
 
 Non-interactive setup is also supported:
 
@@ -174,7 +175,7 @@ First confirm the local tunnel is healthy:
 ./scripts/tunnel-status.sh
 ```
 
-You want to see `Tunnel service: ACTIVE` and `RESULT ok` from `tunnel-client doctor`.
+You want to see `MCP HTTP service: ACTIVE`, `MCP HTTP health: OK`, the profile-specific tunnel service as `ACTIVE`, and `RESULT ok` from `tunnel-client doctor`.
 
 Then, in **ChatGPT web**:
 
