@@ -11,7 +11,7 @@ Spec: `docs/specs/HEAVY-CONCURRENCY-HARDENING.md`
 4. Route every tool execution through the controller; propagate MCP `ctx.signal`.
 5. Extend `shell.exec` with cancellation and POSIX process-group termination for cancellation, timeout, and output-limit paths.
 6. Add `/readyz` and `/metrics`; preserve `/healthz` response exactly.
-7. Add systemd cgroup/file-descriptor/task guardrails to generated service units.
+7. Add systemd cgroup/file-descriptor/task guardrails plus bounded shutdown (`TimeoutStopSec=5`, two-second HTTP connection grace) to generated service units.
 8. Update example config, README, and operational docs.
 
 ## Phase 2 — Automated validation on debian1/2/3

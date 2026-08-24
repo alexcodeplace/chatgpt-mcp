@@ -16,6 +16,7 @@ import { ConcurrencyController } from './concurrency.js';
 import { createComputerMcpServerFactory } from './server.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const HTTP_SHUTDOWN_GRACE_MS = 2_000;
 
 export interface RunningHttpServer {
   server: NodeHttpServer;
@@ -166,10 +167,17 @@ export async function startComputerHttpServer(
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
-      await new Promise<void>((resolve, reject) => {
+      const serverClosed = new Promise<void>((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve());
       });
-      await closeHandler();
+      server.closeIdleConnections();
+      const forceTimer = setTimeout(() => server.closeAllConnections(), HTTP_SHUTDOWN_GRACE_MS);
+      forceTimer.unref();
+      try {
+        await Promise.all([serverClosed, closeHandler()]);
+      } finally {
+        clearTimeout(forceTimer);
+      }
     },
   };
 }

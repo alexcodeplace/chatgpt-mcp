@@ -77,6 +77,9 @@ The generated systemd backend unit MUST use conservative host guardrails:
 - `MemoryHigh=6G`
 - `MemoryMax=9G`
 - `CPUWeight=80`
+- `TimeoutStopSec=5`
+
+HTTP transport shutdown MUST allow at most two seconds for in-flight connections to drain before force-closing them. This keeps supervised restart/rollback recovery bounded even when the service is saturated.
 
 These are last-resort containment, not the primary concurrency mechanism. Admission control is expected to shed load before the cgroup limits are approached.
 
