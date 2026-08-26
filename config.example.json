@@ -3,6 +3,15 @@
     "defaultBackend": "local",
     "lightweightTimeoutMs": 30000,
     "lightweightOutputBytes": 1048576,
+    "localIsolation": {
+      "enabled": false,
+      "command": "systemd-run",
+      "managerCommand": "systemctl",
+      "tasksMax": 512,
+      "memoryMaxBytes": 4294967296,
+      "cpuWeight": 10,
+      "stopTimeoutMs": 3000
+    },
     "kubernetes": {
       "enabled": false,
       "client": {

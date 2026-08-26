@@ -17,6 +17,7 @@ export interface BoundedProcessOptions {
   signal?: AbortSignal;
   stdin?: string | Buffer;
   onOutputBytes?: (bytes: number) => void;
+  onTerminate?: (signal: NodeJS.Signals) => void;
 }
 
 function mapSpawnError(error: unknown, operation: string, command: string) {
@@ -81,9 +82,14 @@ export async function spawnBounded(command: string, args: readonly string[], opt
       child.kill(signal);
     };
 
+    const signalExecution = (signal: NodeJS.Signals): void => {
+      try { options.onTerminate?.(signal); } catch { /* termination hooks are best-effort */ }
+      signalProcess(signal);
+    };
+
     const terminate = (): void => {
-      signalProcess('SIGTERM');
-      const forceTimer = setTimeout(() => signalProcess('SIGKILL'), FORCE_KILL_DELAY_MS);
+      signalExecution('SIGTERM');
+      const forceTimer = setTimeout(() => signalExecution('SIGKILL'), FORCE_KILL_DELAY_MS);
       forceTimer.unref();
     };
 

@@ -94,6 +94,10 @@ test('Kubernetes execution is strictly opt-in and local-only by default', () => 
   assert.equal(config.execution.defaultBackend, 'local');
   assert.equal(config.execution.lightweightTimeoutMs, 30_000);
   assert.equal(config.execution.lightweightOutputBytes, 1024 * 1024);
+  assert.equal(config.execution.localIsolation.enabled, false);
+  assert.equal(config.execution.localIsolation.tasksMax, 512);
+  assert.equal(config.execution.localIsolation.memoryMaxBytes, 4 * 1024 * 1024 * 1024);
+  assert.equal(config.execution.localIsolation.cpuWeight, 10);
   assert.equal(config.execution.kubernetes.enabled, false);
   assert.equal(config.execution.kubernetes.client.command, 'kubectl');
   assert.equal(config.execution.kubernetes.remoteCommands.length, 0);
@@ -196,4 +200,18 @@ test('Kubernetes preparation predicates reject workspace traversal', () => {
     () => parseConfig({ execution: { kubernetes: { workspace: { prepareCommands: [{ command: 'pnpm', whenFiles: ['../secret'] }] } } } }),
     /prepare predicate paths must stay inside the workspace/,
   );
+});
+
+
+test('local systemd isolation is explicitly opt-in and resource bounded', () => {
+  const config = parseConfig({ execution: { localIsolation: { enabled: true, tasksMax: 768, memoryMaxBytes: 2147483648, cpuWeight: 20, stopTimeoutMs: 5000 } } });
+  assert.equal(config.execution.localIsolation.enabled, true);
+  assert.equal(config.execution.localIsolation.command, 'systemd-run');
+  assert.equal(config.execution.localIsolation.managerCommand, 'systemctl');
+  assert.equal(config.execution.localIsolation.tasksMax, 768);
+  assert.equal(config.execution.localIsolation.memoryMaxBytes, 2147483648);
+  assert.equal(config.execution.localIsolation.cpuWeight, 20);
+  assert.equal(config.execution.localIsolation.stopTimeoutMs, 5000);
+  assert.throws(() => parseConfig({ execution: { localIsolation: { tasksMax: 1 } } }));
+  assert.throws(() => parseConfig({ execution: { localIsolation: { cpuWeight: 0 } } }));
 });

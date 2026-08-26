@@ -67,3 +67,16 @@ test('bounded process handles an early stdin close without an unhandled EPIPE', 
     (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OS_ERROR',
   );
 });
+
+
+test('bounded process invokes termination hooks before killing its wrapper', async () => {
+  const signals: NodeJS.Signals[] = [];
+  const result = await spawnBounded(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    timeoutMs: 30,
+    maxOutputBytes: 4096,
+    operation: 'test.terminate.hook',
+    onTerminate: signal => signals.push(signal),
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(signals[0], 'SIGTERM');
+});

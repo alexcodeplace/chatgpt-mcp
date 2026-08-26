@@ -307,6 +307,8 @@ Local and remote shell execution have distinct admission pools. `concurrency.she
 
 Command output is spooled to bounded temporary files rather than accumulated as unbounded chunk arrays in Node memory. `execution.lightweightTimeoutMs` and `execution.lightweightOutputBytes` provide conservative limits for short helper operations; explicit shell runtime/output limits remain governed by the existing `shell` configuration.
 
+Local `shell.exec` process-tree isolation is also opt-in through `execution.localIsolation`. When enabled on a systemd user session, each local command runs in its own transient service with independent `TasksMax`, `MemoryMax`, and `CPUWeight` controls. The MCP daemon remains outside that command cgroup, and completion, timeout, cancellation, or output-limit cleanup stops the entire transient unit. Environment values are inherited by name rather than embedded in the transient-service command line. Public/default behavior remains unchanged because local isolation defaults to disabled.
+
 Operational endpoints:
 
 ```text

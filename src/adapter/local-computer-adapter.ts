@@ -7,6 +7,7 @@ import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
 import { authorizePath } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
+import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
 import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
 import type {
   ApplicationLaunchResult,
@@ -225,14 +226,18 @@ export class LocalComputerAdapter implements ComputerAdapter {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
     const env = validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
-    return spawnBounded(request.command, request.args, {
+    const options = {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
       timeoutMs: clampRuntime(request.timeoutMs, this.config.shell.maxRuntimeMs),
       maxOutputBytes: this.config.shell.maxOutputBytes,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       operation,
-    });
+    };
+    if (this.config.execution.localIsolation.enabled) {
+      return spawnSystemdIsolated(request.command, request.args, options, this.config.execution.localIsolation);
+    }
+    return spawnBounded(request.command, request.args, options);
   }
 
   async listProcesses(): Promise<readonly ProcessInfo[]> {
