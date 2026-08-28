@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+import { basename, delimiter, isAbsolute, join, parse } from 'node:path';
 import { adapterError } from '../errors.js';
 
 
@@ -95,7 +97,82 @@ export interface ShellLimits {
   maxOutputBytes: number;
 }
 
-export function authorizeCommand(command: string, policy: ShellLimits): void {
+const BLOCKED_AGENT_EXECUTABLES = new Set(['claudex', 'claude', 'cdx', 'codex', 'factory']);
+const WRAPPER_EXECUTABLES = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh', 'env', 'nohup', 'systemd-run', 'tmux']);
+const SHELL_COMMAND_FLAGS = new Set(['-c', '--command']);
+const SHELL_SEGMENT_SPLIT = /(?:&&|\|\||[;&|`\n])/;
+const AGENT_LAUNCH_MESSAGE = 'launching agent sessions from this MCP is disabled by the owner';
+
+function resolvePath(token: string): string | undefined {
+  if (isAbsolute(token) || token.includes('/')) {
+    try {
+      return realpathSync(token);
+    } catch {
+      return undefined;
+    }
+  }
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir.length === 0) continue;
+    try {
+      return realpathSync(join(dir, token));
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function candidateNames(token: string): readonly string[] {
+  const names = new Set<string>([basename(token), parse(token).name]);
+  const resolved = resolvePath(token);
+  if (resolved !== undefined) {
+    names.add(basename(resolved));
+    names.add(parse(resolved).name);
+  }
+  return [...names];
+}
+
+function isBlockedToken(token: string): boolean {
+  return candidateNames(token).some(name => BLOCKED_AGENT_EXECUTABLES.has(name));
+}
+
+function resolvedBasename(token: string): string {
+  const resolved = resolvePath(token);
+  return resolved === undefined ? basename(token) : basename(resolved);
+}
+
+function leadingCommandToken(segment: string): string | undefined {
+  for (const word of segment.trim().split(/\s+/).filter(part => part.length > 0)) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+    return word.replace(/^["']|["']$/g, '');
+  }
+  return undefined;
+}
+
+function tokenizeShellSegments(value: string): string[] {
+  return value
+    .split(SHELL_SEGMENT_SPLIT)
+    .map(leadingCommandToken)
+    .filter((token): token is string => token !== undefined && token.length > 0);
+}
+
+function commandLaunchesBlockedAgent(command: string, args: readonly string[]): boolean {
+  if (isBlockedToken(command)) return true;
+  if (!WRAPPER_EXECUTABLES.has(resolvedBasename(command))) return false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === undefined) continue;
+    if (SHELL_COMMAND_FLAGS.has(arg)) {
+      const script = args[index + 1];
+      if (script !== undefined && tokenizeShellSegments(script).some(isBlockedToken)) return true;
+      continue;
+    }
+    if (isBlockedToken(arg)) return true;
+  }
+  return false;
+}
+
+export function authorizeCommand(command: string, args: readonly string[], policy: ShellLimits): void {
   if (!policy.enabled) {
     throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Shell execution is disabled.');
   }
@@ -104,6 +181,9 @@ export function authorizeCommand(command: string, policy: ShellLimits): void {
   }
   if (!policy.allowedCommands.includes('*') && !policy.allowedCommands.includes(command)) {
     throw adapterError('COMMAND_NOT_ALLOWED', 'shell.exec', 'Executable is not in the configured allow-list.', { command });
+  }
+  if (commandLaunchesBlockedAgent(command, args)) {
+    throw adapterError('COMMAND_NOT_ALLOWED', 'shell.exec', AGENT_LAUNCH_MESSAGE, { command });
   }
 }
 

@@ -219,7 +219,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
 
   async exec(request: ExecRequest): Promise<ExecResult> {
     const operation = 'shell.exec';
-    authorizeCommand(request.command, this.config.shell);
+    authorizeCommand(request.command, request.args, this.config.shell);
     authorizeHostDisplaySafeInvocation(request.command, request.args, this.config.desktop.hostDisplayAccess);
     let cwd: string | undefined;
     if (request.cwd !== undefined) {

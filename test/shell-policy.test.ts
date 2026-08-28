@@ -88,3 +88,27 @@ test('host display guard preserves ordinary shell, Python, Node, and ffmpeg work
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('ffmpeg', ['-i', 'input.mp4', '-c:v', 'copy', 'output.mp4'], false));
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('grim', [], true));
 });
+
+
+test('direct agent launch is blocked', () => {
+  for (const name of ['claudex', 'claude', 'cdx', 'codex', 'factory']) {
+    assert.throws(() => authorizeCommand(name, [], wildcardPolicy), isCommandNotAllowed, name);
+  }
+});
+
+test('agent launch via shell wrapper is blocked', () => {
+  assert.throws(() => authorizeCommand('bash', ['-c', 'cd /tmp && claudex -p "do it"'], wildcardPolicy), isCommandNotAllowed);
+  assert.throws(() => authorizeCommand('sh', ['-c', 'codex -p "run task"'], wildcardPolicy), isCommandNotAllowed);
+});
+
+test('agent launch via wrappers is blocked', () => {
+  assert.throws(() => authorizeCommand('env', ['FOO=bar', 'claudex'], wildcardPolicy), isCommandNotAllowed);
+  assert.throws(() => authorizeCommand('nohup', ['factory'], wildcardPolicy), isCommandNotAllowed);
+  assert.throws(() => authorizeCommand('systemd-run', ['--user', 'cdx'], wildcardPolicy), isCommandNotAllowed);
+  assert.throws(() => authorizeCommand('tmux', ['send-keys', 'claudex', 'Enter'], wildcardPolicy), isCommandNotAllowed);
+});
+
+test('ordinary commands and blocked-word filenames still pass', () => {
+  assert.doesNotThrow(() => authorizeCommand('git', ['status', '--short'], policy));
+  assert.doesNotThrow(() => authorizeCommand('cat', ['notes-about-claudex.txt'], wildcardPolicy));
+});
