@@ -98,7 +98,7 @@ export function registerTools(
         capabilities: z.object({
           filesystemRead: z.boolean(), filesystemWrite: z.boolean(), filesystemRoots: z.number().int(),
           shell: z.boolean(), processList: z.boolean(), processKill: z.boolean(), service: z.boolean(),
-          application: z.boolean(), browser: z.boolean(), hostDisplayAccess: z.boolean(), screenCapture: z.boolean(), input: z.boolean(),
+          application: z.boolean(), browser: z.boolean(), hostDisplayAccess: z.boolean(), screenCapture: z.boolean(), screenRecording: z.boolean(), input: z.boolean(),
         }),
       }),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -117,6 +117,7 @@ export function registerTools(
         browser: config.browser.enabled && config.desktop.hostDisplayAccess,
         hostDisplayAccess: config.desktop.hostDisplayAccess,
         screenCapture: config.desktop.hostDisplayAccess && config.desktop.screenCapture,
+        screenRecording: config.desktop.hostDisplayAccess && config.desktop.screenRecording && config.filesystem.write && config.filesystem.roots.length > 0,
         input: config.desktop.hostDisplayAccess && config.desktop.input,
       },
     })),
@@ -380,6 +381,45 @@ export function registerTools(
           return failure(error, 'screen.capture');
         }
       },
+    );
+  }
+
+
+  if (config.desktop.hostDisplayAccess && config.desktop.screenRecording && config.filesystem.write && config.filesystem.roots.length > 0) {
+    server.registerTool(
+      'screen.record.start',
+      {
+        title: 'Start Screen Recording',
+        description: 'Use this to start an asynchronous MP4 recording of the caller-selected X11 DISPLAY. Returns a handle immediately so other display/input tools can run while recording continues.',
+        inputSchema: z.object({
+          display: displaySchema,
+          path: pathInput.refine(value => value.toLowerCase().endsWith('.mp4'), { message: 'path must end in .mp4' }),
+          frameRate: z.number().int().min(1).max(60).default(30),
+        }),
+        outputSchema: z.object({
+          handle: z.string().min(1), pid: z.number().int().positive(), path: z.string(), display: z.string(), startedAt: z.string(),
+        }),
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      },
+      async ({ display, path, frameRate }, ctx) => run('screen.record.start', concurrency, ctx.mcpReq.signal, async () => ({
+        ...await adapter.startScreenRecording(display, path, frameRate),
+      })),
+    );
+
+    server.registerTool(
+      'screen.record.stop',
+      {
+        title: 'Stop Screen Recording',
+        description: 'Use this to stop and finalize a screen recording previously started with screen.record.start.',
+        inputSchema: z.object({ handle: z.string().min(1) }),
+        outputSchema: z.object({
+          handle: z.string().min(1), path: z.string(), display: z.string(), bytes: z.number().int().positive(), durationMs: z.number().nonnegative(),
+        }),
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      },
+      async ({ handle }, ctx) => run('screen.record.stop', concurrency, ctx.mcpReq.signal, async () => ({
+        ...await adapter.stopScreenRecording(handle),
+      })),
     );
   }
 

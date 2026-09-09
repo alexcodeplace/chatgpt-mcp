@@ -52,10 +52,14 @@ const browserSchema = z.object({
 const desktopSchema = z.object({
   hostDisplayAccess: z.boolean().default(false),
   screenCapture: z.boolean().default(false),
+  screenRecording: z.boolean().default(false),
   input: z.boolean().default(false),
   screenBackend: z.enum(['auto', 'grim', 'gnome-screenshot', 'scrot', 'imagemagick-import']).default('auto'),
   inputBackend: z.literal('xdotool').default('xdotool'),
   maxImageBytes: z.number().int().positive().max(64 * 1024 * 1024).default(10 * 1024 * 1024),
+  maxRecordingBytes: z.number().int().positive().max(16 * 1024 * 1024 * 1024).default(2 * 1024 * 1024 * 1024),
+  maxRecordingSeconds: z.number().int().positive().max(24 * 60 * 60).default(60 * 60),
+  maxRecordings: z.number().int().positive().max(64).default(8),
   maxTextBytes: z.number().int().positive().max(1024 * 1024).default(64 * 1024),
 });
 
@@ -205,10 +209,14 @@ const configSchema = z.object({
   desktop: desktopSchema.default({
     hostDisplayAccess: false,
     screenCapture: false,
+    screenRecording: false,
     input: false,
     screenBackend: 'auto',
     inputBackend: 'xdotool',
     maxImageBytes: 10 * 1024 * 1024,
+    maxRecordingBytes: 2 * 1024 * 1024 * 1024,
+    maxRecordingSeconds: 60 * 60,
+    maxRecordings: 8,
     maxTextBytes: 64 * 1024,
   }),
   logLevel: z.enum(['silent', 'error', 'warn', 'info', 'debug']).default('info'),

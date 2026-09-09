@@ -25,6 +25,8 @@ function fakeAdapter(): ComputerAdapter {
     async closeApplication() {},
     async openBrowser() {},
     async captureScreen() { return { mimeType: 'image/png', data: Buffer.from('png').toString('base64'), bytes: 3 }; },
+    async startScreenRecording(display, path) { return { handle: 'rec_test', pid: 43, path, display, startedAt: '2026-09-09T00:00:00.000Z' }; },
+    async stopScreenRecording(handle) { return { handle, path: '/tmp/test.mp4', display: ':0', bytes: 123, durationMs: 1000 }; },
     async movePointer() {},
     async clickPointer() {},
     async typeText() {},
@@ -96,13 +98,14 @@ test('tool discovery exposes the complete extended capability surface when grant
     service: { enabled: true, allowedServices: ['*'] },
     application: { enabled: true, applications: { editor: { command: 'editor' } } },
     browser: { enabled: true },
-    desktop: { hostDisplayAccess: true, screenCapture: true, input: true },
+    filesystem: { write: true, roots: ['/tmp'] },
+    desktop: { hostDisplayAccess: true, screenCapture: true, screenRecording: true, input: true },
   });
   try {
     const names = (await client.listTools()).tools.map(tool => tool.name).sort();
     assert.deepEqual(names, [
-      'app.close', 'app.launch', 'browser.open', 'input.click', 'input.key', 'input.move', 'input.type',
-      'screen.capture', 'service.control', 'service.status', 'system.info',
+      'app.close', 'app.launch', 'browser.open', 'fs.delete', 'fs.mkdir', 'fs.move', 'fs.write', 'input.click', 'input.key', 'input.move', 'input.type',
+      'screen.capture', 'screen.record.start', 'screen.record.stop', 'service.control', 'service.status', 'system.info',
     ]);
   } finally {
     await client.close();
@@ -302,6 +305,59 @@ test('display-dependent tools require and forward the caller-selected DISPLAY pe
     const missingDisplay = await client.callTool({ name: 'screen.capture', arguments: {} });
     assert.equal(missingDisplay.isError, true);
     assert.equal(calls.length, 7);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+
+test('screen recording start and stop expose asynchronous handle contract with per-recording DISPLAY', async () => {
+  const calls: unknown[] = [];
+  const adapter = fakeAdapter();
+  adapter.startScreenRecording = async (display, path, frameRate) => {
+    calls.push(['start', display, path, frameRate]);
+    return { handle: 'rec_123', pid: 88, path, display, startedAt: '2026-09-09T00:00:00.000Z' };
+  };
+  adapter.stopScreenRecording = async handle => {
+    calls.push(['stop', handle]);
+    return { handle, path: '/tmp/capture.mp4', display: ':77', bytes: 4567, durationMs: 2345 };
+  };
+  const { client, server } = await harness({
+    filesystem: { write: true, roots: ['/tmp'] },
+    desktop: { hostDisplayAccess: true, screenRecording: true },
+  }, adapter);
+  try {
+    const started = await client.callTool({
+      name: 'screen.record.start',
+      arguments: { display: ':77', path: '/tmp/capture.mp4', frameRate: 24 },
+    });
+    assert.deepEqual(started.structuredContent, {
+      handle: 'rec_123', pid: 88, path: '/tmp/capture.mp4', display: ':77', startedAt: '2026-09-09T00:00:00.000Z',
+    });
+    const stopped = await client.callTool({ name: 'screen.record.stop', arguments: { handle: 'rec_123' } });
+    assert.deepEqual(stopped.structuredContent, {
+      handle: 'rec_123', path: '/tmp/capture.mp4', display: ':77', bytes: 4567, durationMs: 2345,
+    });
+    assert.deepEqual(calls, [
+      ['start', ':77', '/tmp/capture.mp4', 24],
+      ['stop', 'rec_123'],
+    ]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('screen recording tools stay hidden without filesystem write authority', async () => {
+  const { client, server } = await harness({
+    filesystem: { read: true, roots: ['/tmp'] },
+    desktop: { hostDisplayAccess: true, screenRecording: true },
+  });
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name);
+    assert.equal(names.includes('screen.record.start'), false);
+    assert.equal(names.includes('screen.record.stop'), false);
   } finally {
     await client.close();
     await server.close();

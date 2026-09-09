@@ -45,7 +45,7 @@ The installer asks for both values if they are not already supplied through:
 
 Options:
   --yes         accept the broad-control configuration without prompting
-  --no-desktop  do not attempt to install xdotool/xdg-utils/screenshot helpers
+  --no-desktop  do not attempt to install xdotool/xdg-utils/screenshot/recording helpers
   -h, --help    show this help
 USAGE
 }
@@ -237,6 +237,7 @@ install_desktop_packages() {
   local need=()
   command -v xdotool >/dev/null 2>&1 || need+=(xdotool)
   command -v xdg-open >/dev/null 2>&1 || need+=(xdg-utils)
+  command -v ffmpeg >/dev/null 2>&1 || need+=(ffmpeg)
   if ! command -v grim >/dev/null 2>&1 && ! command -v gnome-screenshot >/dev/null 2>&1 \
     && ! command -v scrot >/dev/null 2>&1 && ! command -v import >/dev/null 2>&1; then
     need+=(scrot)

@@ -125,10 +125,14 @@
   "desktop": {
     "hostDisplayAccess": true,
     "screenCapture": true,
+    "screenRecording": true,
     "input": true,
     "screenBackend": "auto",
     "inputBackend": "xdotool",
     "maxImageBytes": 4194304,
+    "maxRecordingBytes": 2147483648,
+    "maxRecordingSeconds": 3600,
+    "maxRecordings": 8,
     "maxTextBytes": 65536
   },
   "logLevel": "info"

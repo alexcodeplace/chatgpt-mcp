@@ -63,6 +63,23 @@ export interface ScreenCapture {
   bytes: number;
 }
 
+
+export interface ScreenRecordingStartResult {
+  handle: string;
+  pid: number;
+  path: string;
+  display: string;
+  startedAt: string;
+}
+
+export interface ScreenRecordingStopResult {
+  handle: string;
+  path: string;
+  display: string;
+  bytes: number;
+  durationMs: number;
+}
+
 export type PointerButton = 'left' | 'middle' | 'right';
 
 export interface ComputerAdapter {
@@ -84,6 +101,8 @@ export interface ComputerAdapter {
   closeApplication(handle: string): Promise<void>;
   openBrowser(url: string, display: string): Promise<void>;
   captureScreen(display: string): Promise<ScreenCapture>;
+  startScreenRecording(display: string, path: string, frameRate?: number): Promise<ScreenRecordingStartResult>;
+  stopScreenRecording(handle: string): Promise<ScreenRecordingStopResult>;
   movePointer(x: number, y: number, display: string): Promise<void>;
   clickPointer(button: PointerButton, display: string, x?: number, y?: number): Promise<void>;
   typeText(text: string, display: string, delayMs?: number): Promise<void>;
