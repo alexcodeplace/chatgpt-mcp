@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE_MCP_DIR="${LIVE_MCP_DIR:-$HOME/.local/share/chatgpt-mcp}"
 DISPLAY_TARGET="${DISPLAY_TARGET:-:0}"
 SEARCH_QUERY="${SEARCH_QUERY:-vibeil community}"
+LOCALE="${LOCALE:-C.UTF-8}"
 OUTPUT="${OUTPUT:-$HOME/Projects/overdeck/inbox/vibeil-community-startpage-demo.mp4}"
 PLAYBACK_SPEED="${PLAYBACK_SPEED:-0.5}"
 FRAME_RATE="${FRAME_RATE:-20}"
@@ -45,6 +46,14 @@ user_pref("datareporting.policy.firstRunURL", "");
 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 EOF
 
+if [[ "$LOCALE" == he_IL* ]]; then
+  cat >> "$PROFILE_DIR/user.js" <<'EOF'
+user_pref("intl.locale.requested", "he");
+user_pref("intl.accept_languages", "he-IL, he, en-US, en");
+user_pref("browser.search.region", "IL");
+EOF
+fi
+
 if ! DISPLAY="$DISPLAY_TARGET" xdpyinfo >/dev/null 2>&1; then
   if [[ "$DISPLAY_TARGET" != ":0" ]]; then
     echo "display $DISPLAY_TARGET is not available" >&2
@@ -65,7 +74,7 @@ if ! DISPLAY="$DISPLAY_TARGET" xdpyinfo >/dev/null 2>&1; then
   fi
 fi
 
-export DISPLAY_TARGET SEARCH_QUERY RAW META FRAME_RATE MCP_URL PROFILE_DIR LIVE_MCP_DIR
+export DISPLAY_TARGET SEARCH_QUERY LOCALE RAW META FRAME_RATE MCP_URL PROFILE_DIR LIVE_MCP_DIR
 
 cd "$LIVE_MCP_DIR"
 node --input-type=module <<'NODE'
@@ -75,6 +84,7 @@ import { writeFile } from 'node:fs/promises';
 
 const display = process.env.DISPLAY_TARGET;
 const query = process.env.SEARCH_QUERY;
+const locale = process.env.LOCALE;
 const raw = process.env.RAW;
 const metaPath = process.env.META;
 const frameRate = Number(process.env.FRAME_RATE || '20');
@@ -162,6 +172,7 @@ try {
   await writeFile(metaPath, JSON.stringify({
     display,
     query,
+    locale,
     homeTitle,
     resultTitle,
     resultsVisibleForMs: stoppedAt - resultsVisibleAt,
