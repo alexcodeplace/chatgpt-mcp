@@ -343,6 +343,8 @@ Example configuration shape:
 
 `allowedCommands: ["*"]` may be supported as an explicit owner choice.
 
+Desktop-facing authority has a master `desktop.hostDisplayAccess` boolean. Display-dependent tools MUST take an explicit caller-selected X11 `display` value per invocation; the server MUST NOT choose or mutate a process-global `DISPLAY` on their behalf. `app.launch`, `browser.open`, `screen.capture`, and every `input.*` operation pass that display only to the child processes used by that invocation, permitting one MCP server to control multiple X11 displays concurrently without cross-call environment races. The selected display SHOULD be returned in structured tool metadata.
+
 Desktop-facing authority has a master `desktop.hostDisplayAccess` boolean. `screen.capture`, desktop input, configured application launch, and configured browser opening require this master grant in addition to their own family flags. When it is denied, shell children must not inherit host graphical-session environment such as `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, or `DBUS_SESSION_BUS_ADDRESS`, caller-provided environment input must not be allowed to reintroduce those values, and shell policy must reject a maintained defense-in-depth set of obvious host-capture executables and high-signal one-shot capture payloads. The denylist is explicitly not a substitute for OS isolation against arbitrary same-user code execution.
 
 No hard-coded interactive confirmation step is inserted after policy authorization. The permission boundary is the combination of ChatGPT/plugin permissions plus this server's configured capabilities.

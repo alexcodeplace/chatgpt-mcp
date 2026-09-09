@@ -9,28 +9,32 @@ const policy = {
   maxOutputBytes: 4096,
 } as const;
 
+const wildcardPolicy = { ...policy, allowedCommands: ['*'] } as const;
+const isCommandNotAllowed = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED';
+
 test('allowed executable passes', () => {
-  assert.doesNotThrow(() => authorizeCommand('git', policy));
+  assert.doesNotThrow(() => authorizeCommand('git', [], policy));
 });
 
 test('disabled shell rejects before command inspection', () => {
-  assert.throws(() => authorizeCommand('git', { ...policy, enabled: false }), (error: unknown) => {
+  assert.throws(() => authorizeCommand('git', [], { ...policy, enabled: false }), (error: unknown) => {
     return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CAPABILITY_DISABLED';
   });
 });
 
 test('unlisted executable rejects', () => {
-  assert.throws(() => authorizeCommand('rm', policy), (error: unknown) => {
+  assert.throws(() => authorizeCommand('rm', [], policy), (error: unknown) => {
     return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED';
   });
 });
 
 test('paths are not accepted as executable names', () => {
-  assert.throws(() => authorizeCommand('/bin/git', { ...policy, allowedCommands: ['*'] }));
+  assert.throws(() => authorizeCommand('/bin/git', [], { ...policy, allowedCommands: ['*'] }));
 });
 
 test('explicit wildcard allows executable names', () => {
-  assert.doesNotThrow(() => authorizeCommand('printf', { ...policy, allowedCommands: ['*'] }));
+  assert.doesNotThrow(() => authorizeCommand('printf', [], { ...policy, allowedCommands: ['*'] }));
 });
 
 test('runtime and output values clamp to configured maxima', () => {

@@ -39,7 +39,7 @@ export class RoutingComputerAdapter extends LocalComputerAdapter {
 
     this.metrics.recordRoute('remote');
     const operation = 'shell.exec';
-    authorizeCommand(request.command, this.routingConfig.shell);
+    authorizeCommand(request.command, request.args, this.routingConfig.shell);
     authorizeHostDisplaySafeInvocation(request.command, request.args, this.routingConfig.desktop.hostDisplayAccess);
     const cwd = await authorizePath(request.cwd!, this.routingConfig.filesystem.roots, operation);
     const env = validateShellEnvironment(

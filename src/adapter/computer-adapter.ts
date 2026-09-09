@@ -80,12 +80,12 @@ export interface ComputerAdapter {
   killProcess(pid: number, signal?: NodeJS.Signals): Promise<void>;
   serviceStatus(name: string): Promise<ServiceStatus>;
   serviceControl(name: string, action: ServiceAction): Promise<void>;
-  launchApplication(name: string, args?: readonly string[]): Promise<ApplicationLaunchResult>;
+  launchApplication(name: string, args: readonly string[], display: string): Promise<ApplicationLaunchResult>;
   closeApplication(handle: string): Promise<void>;
-  openBrowser(url: string): Promise<void>;
-  captureScreen(): Promise<ScreenCapture>;
-  movePointer(x: number, y: number): Promise<void>;
-  clickPointer(button: PointerButton, x?: number, y?: number): Promise<void>;
-  typeText(text: string, delayMs?: number): Promise<void>;
-  pressKey(key: string): Promise<void>;
+  openBrowser(url: string, display: string): Promise<void>;
+  captureScreen(display: string): Promise<ScreenCapture>;
+  movePointer(x: number, y: number, display: string): Promise<void>;
+  clickPointer(button: PointerButton, display: string, x?: number, y?: number): Promise<void>;
+  typeText(text: string, display: string, delayMs?: number): Promise<void>;
+  pressKey(key: string, display: string): Promise<void>;
 }

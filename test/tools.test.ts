@@ -202,8 +202,8 @@ test('oversized tool responses fail locally before the tunnel transport limit', 
 test('application launch returns an explicit handle and close consumes that handle', async () => {
   const calls: unknown[] = [];
   const adapter = fakeAdapter();
-  adapter.launchApplication = async (name, args) => {
-    calls.push(['launch', name, args]);
+  adapter.launchApplication = async (name, args, display) => {
+    calls.push(['launch', name, args, display]);
     return { handle: 'app_123', pid: 77 };
   };
   adapter.closeApplication = async handle => { calls.push(['close', handle]); };
@@ -212,11 +212,11 @@ test('application launch returns an explicit handle and close consumes that hand
     desktop: { hostDisplayAccess: true },
   }, adapter);
   try {
-    const launched = await client.callTool({ name: 'app.launch', arguments: { name: 'editor', args: ['file.txt'] } });
-    assert.deepEqual(launched.structuredContent, { handle: 'app_123', pid: 77 });
+    const launched = await client.callTool({ name: 'app.launch', arguments: { name: 'editor', args: ['file.txt'], display: ':0' } });
+    assert.deepEqual(launched.structuredContent, { handle: 'app_123', pid: 77, display: ':0' });
     const closed = await client.callTool({ name: 'app.close', arguments: { handle: 'app_123' } });
     assert.equal(closed.isError, undefined);
-    assert.deepEqual(calls, [['launch', 'editor', ['file.txt']], ['close', 'app_123']]);
+    assert.deepEqual(calls, [['launch', 'editor', ['file.txt'], ':0'], ['close', 'app_123']]);
   } finally {
     await client.close();
     await server.close();
@@ -226,8 +226,8 @@ test('application launch returns an explicit handle and close consumes that hand
 test('screen capture returns MCP image content and compact structured metadata', async () => {
   const { client, server } = await harness({ desktop: { hostDisplayAccess: true, screenCapture: true } });
   try {
-    const result = await client.callTool({ name: 'screen.capture', arguments: {} });
-    assert.deepEqual(result.structuredContent, { mimeType: 'image/png', bytes: 3 });
+    const result = await client.callTool({ name: 'screen.capture', arguments: { display: ':99' } });
+    assert.deepEqual(result.structuredContent, { mimeType: 'image/png', bytes: 3, display: ':99' });
     assert.equal(result.content.some(item => item.type === 'image'), true);
   } finally {
     await client.close();
@@ -241,9 +241,67 @@ test('input click schema rejects a lone coordinate before adapter invocation', a
   adapter.clickPointer = async () => { called = true; };
   const { client, server } = await harness({ desktop: { hostDisplayAccess: true, input: true } }, adapter);
   try {
-    const result = await client.callTool({ name: 'input.click', arguments: { x: 10 } });
+    const result = await client.callTool({ name: 'input.click', arguments: { display: ':0', x: 10 } });
     assert.equal(result.isError, true);
     assert.equal(called, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+
+test('display-dependent tools require and forward the caller-selected DISPLAY per invocation', async () => {
+  const calls: unknown[] = [];
+  const adapter = fakeAdapter();
+  adapter.launchApplication = async (name, args, display) => {
+    calls.push(['launch', name, args, display]);
+    return { handle: 'app_display', pid: 90 };
+  };
+  adapter.openBrowser = async (url, display) => { calls.push(['browser', url, display]); };
+  adapter.captureScreen = async display => {
+    calls.push(['capture', display]);
+    return { mimeType: 'image/png', data: Buffer.from('png').toString('base64'), bytes: 3 };
+  };
+  adapter.movePointer = async (x, y, display) => { calls.push(['move', x, y, display]); };
+  adapter.clickPointer = async (button, display, x, y) => { calls.push(['click', button, display, x, y]); };
+  adapter.typeText = async (text, display, delayMs) => { calls.push(['type', text, display, delayMs]); };
+  adapter.pressKey = async (key, display) => { calls.push(['key', key, display]); };
+
+  const { client, server } = await harness({
+    application: { enabled: true, applications: { editor: { command: 'editor', allowArguments: true } } },
+    browser: { enabled: true },
+    desktop: { hostDisplayAccess: true, screenCapture: true, input: true },
+  }, adapter);
+  try {
+    const launch = await client.callTool({ name: 'app.launch', arguments: { name: 'editor', display: ':0' } });
+    const browser = await client.callTool({ name: 'browser.open', arguments: { url: 'https://example.com', display: ':99' } });
+    const capture = await client.callTool({ name: 'screen.capture', arguments: { display: ':100' } });
+    const move = await client.callTool({ name: 'input.move', arguments: { x: 10, y: 20, display: ':101' } });
+    const click = await client.callTool({ name: 'input.click', arguments: { button: 'right', x: 30, y: 40, display: ':102' } });
+    const type = await client.callTool({ name: 'input.type', arguments: { text: 'hello', delayMs: 5, display: ':103' } });
+    const key = await client.callTool({ name: 'input.key', arguments: { key: 'Enter', display: ':104' } });
+
+    assert.equal((launch.structuredContent as { display?: string })?.display, ':0');
+    assert.equal((browser.structuredContent as { display?: string })?.display, ':99');
+    assert.equal((capture.structuredContent as { display?: string })?.display, ':100');
+    assert.equal((move.structuredContent as { display?: string })?.display, ':101');
+    assert.equal((click.structuredContent as { display?: string })?.display, ':102');
+    assert.equal((type.structuredContent as { display?: string })?.display, ':103');
+    assert.equal((key.structuredContent as { display?: string })?.display, ':104');
+    assert.deepEqual(calls, [
+      ['launch', 'editor', [], ':0'],
+      ['browser', 'https://example.com', ':99'],
+      ['capture', ':100'],
+      ['move', 10, 20, ':101'],
+      ['click', 'right', ':102', 30, 40],
+      ['type', 'hello', ':103', 5],
+      ['key', 'Enter', ':104'],
+    ]);
+
+    const missingDisplay = await client.callTool({ name: 'screen.capture', arguments: {} });
+    assert.equal(missingDisplay.isError, true);
+    assert.equal(calls.length, 7);
   } finally {
     await client.close();
     await server.close();

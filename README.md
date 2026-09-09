@@ -36,14 +36,14 @@ Every family except `system.info` is opt-in. Disabled capability families are om
 | `process.kill` | Send a signal to a PID |
 | `service.status` | Read an allowed system service state |
 | `service.control` | Start, stop, or restart an allowed service |
-| `app.launch` | Launch a configured named application |
+| `app.launch` | Launch a configured named application on a caller-selected X11 `DISPLAY` |
 | `app.close` | Close an application previously launched through its handle |
-| `browser.open` | Open an allowed URL scheme |
-| `screen.capture` | Capture the desktop as a PNG MCP image; requires `desktop.hostDisplayAccess` |
-| `input.move` | Move the desktop pointer; requires `desktop.hostDisplayAccess` |
-| `input.click` | Click the desktop pointer; requires `desktop.hostDisplayAccess` |
-| `input.type` | Type literal text into the focused application |
-| `input.key` | Send a key sequence to the focused application |
+| `browser.open` | Open an allowed URL scheme on a caller-selected X11 `DISPLAY` |
+| `screen.capture` | Capture a caller-selected X11 `DISPLAY` as a PNG MCP image; requires `desktop.hostDisplayAccess` |
+| `input.move` | Move the pointer on a caller-selected X11 `DISPLAY`; requires `desktop.hostDisplayAccess` |
+| `input.click` | Click the pointer on a caller-selected X11 `DISPLAY`; requires `desktop.hostDisplayAccess` |
+| `input.type` | Type literal text into the focused application on a caller-selected X11 `DISPLAY` |
+| `input.key` | Send a key sequence to the focused application on a caller-selected X11 `DISPLAY` |
 
 ## Requirements
 
@@ -252,6 +252,8 @@ export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
 ```
 
 The default configuration exposes only `system.info`. See [`config.example.json`](./config.example.json) for every capability family. `config.local.json` and `.secrets/` are gitignored.
+
+`desktop.hostDisplayAccess` is a master grant for access to graphical sessions. Every display-dependent MCP call (`app.launch`, `browser.open`, `screen.capture`, and all `input.*` tools) requires an explicit `display` argument such as `":0"` or `":99"`. The MCP service/launcher does not set a default `DISPLAY`, and the MCP server has no implicit GUI-display selection for these tools: the requested value is injected into that operation's child-process environment without mutating the server's `process.env`, so one server can safely target multiple X11 displays concurrently. Inherited Wayland/Mir routing variables are removed for these explicitly X11-targeted operations. The selected display is echoed in structured tool results for observability.
 
 `desktop.hostDisplayAccess` is a master grant for access to the workstation's graphical session. When false, `screen.capture`, desktop input, application launching, and browser opening are omitted even if their subordinate flags are true. `shell.exec` children also have `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, and `DBUS_SESSION_BUS_ADDRESS` removed, callers cannot add those variables back through the tool's `env` parameter, and a defense-in-depth guard rejects common screenshot executables plus high-signal FFmpeg/GStreamer/D-Bus/Python/JavaScript capture invocations.
 

@@ -90,6 +90,13 @@ function validateCoordinates(x: number, y: number, operation: string): void {
   }
 }
 
+function validateDisplay(display: string, operation: string): string {
+  if (display.length === 0 || display.length > 255 || /[\0\r\n]/.test(display)) {
+    throw adapterError('INVALID_INPUT', operation, 'display must be a non-empty X11 DISPLAY value.', { display });
+  }
+  return display;
+}
+
 export class LocalComputerAdapter implements ComputerAdapter {
   private readonly applications = new Map<string, ChildProcess>();
 
@@ -340,10 +347,11 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  async launchApplication(name: string, args: readonly string[] = []): Promise<ApplicationLaunchResult> {
+  async launchApplication(name: string, args: readonly string[], display: string): Promise<ApplicationLaunchResult> {
     const operation = 'app.launch';
     requireCapability(this.config.application.enabled, operation, 'Application launching is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    const desktopEnv = this.desktopEnvironment(display, operation);
     const definition = this.config.application.applications[name];
     if (definition === undefined) {
       throw adapterError('COMMAND_NOT_ALLOWED', operation, 'Application is not configured.', { name });
@@ -367,7 +375,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
         detached: true,
         shell: false,
         stdio: 'ignore',
-        env: sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess),
+        env: desktopEnv,
       });
       await new Promise<void>((resolve, reject) => {
         child.once('spawn', resolve);
@@ -405,10 +413,11 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  async openBrowser(rawUrl: string): Promise<void> {
+  async openBrowser(rawUrl: string, display: string): Promise<void> {
     const operation = 'browser.open';
     requireCapability(this.config.browser.enabled, operation, 'Browser opening is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    const desktopEnv = this.desktopEnvironment(display, operation);
     if (Buffer.byteLength(rawUrl, 'utf8') > MAX_URL_BYTES) {
       throw adapterError('INVALID_INPUT', operation, 'URL exceeds the implementation byte limit.');
     }
@@ -428,7 +437,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
         [url.toString()],
         operation,
         this.config.browser.maxRuntimeMs,
-        sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess),
+        desktopEnv,
         this.config.execution.lightweightOutputBytes,
       );
     } catch (error) {
@@ -436,10 +445,11 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  async captureScreen(): Promise<ScreenCapture> {
+  async captureScreen(display: string): Promise<ScreenCapture> {
     const operation = 'screen.capture';
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.screenCapture, operation, 'Screen capture is disabled.');
+    const desktopEnv = this.desktopEnvironment(display, operation);
     const dir = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-screen-'));
     const file = join(dir, 'screen.png');
     const candidates = this.config.desktop.screenBackend === 'auto'
@@ -465,6 +475,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
             timeoutMs: 30_000,
             maxOutputBytes: 1024 * 1024,
             operation,
+            env: desktopEnv,
           });
           if (!result.timedOut && result.exitCode === 0) {
             const image = await readFile(file);
@@ -488,36 +499,48 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  private async xdotool(args: readonly string[], operation: string): Promise<void> {
+  private desktopEnvironment(display: string, operation: string): NodeJS.ProcessEnv {
+    const value = validateDisplay(display, operation);
+    const env = sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess);
+    // DISPLAY is selected by each MCP invocation. Do not mutate process.env: concurrent
+    // calls may intentionally target different X servers. Prefer the explicit X11 target
+    // over an inherited Wayland/Mir target so application routing is deterministic.
+    delete env.WAYLAND_DISPLAY;
+    delete env.MIR_SOCKET;
+    env.DISPLAY = value;
+    return env;
+  }
+
+  private async xdotool(args: readonly string[], operation: string, display: string): Promise<void> {
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.input, operation, 'Desktop input is disabled.');
     try {
-      await requireSuccessfulCommand('xdotool', args, operation, Math.min(30_000, this.config.execution.lightweightTimeoutMs), undefined, this.config.execution.lightweightOutputBytes);
+      await requireSuccessfulCommand('xdotool', args, operation, Math.min(30_000, this.config.execution.lightweightTimeoutMs), this.desktopEnvironment(display, operation), this.config.execution.lightweightOutputBytes);
     } catch (error) {
       mapOsError(error, operation);
     }
   }
 
-  async movePointer(x: number, y: number): Promise<void> {
+  async movePointer(x: number, y: number, display: string): Promise<void> {
     const operation = 'input.move';
     validateCoordinates(x, y, operation);
-    await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation);
+    await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation, display);
   }
 
-  async clickPointer(button: PointerButton, x?: number, y?: number): Promise<void> {
+  async clickPointer(button: PointerButton, display: string, x?: number, y?: number): Promise<void> {
     const operation = 'input.click';
     if ((x === undefined) !== (y === undefined)) {
       throw adapterError('INVALID_INPUT', operation, 'x and y must be supplied together.');
     }
     if (x !== undefined && y !== undefined) {
       validateCoordinates(x, y, operation);
-      await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation);
+      await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation, display);
     }
     const buttonNumber = button === 'left' ? '1' : button === 'middle' ? '2' : '3';
-    await this.xdotool(['click', buttonNumber], operation);
+    await this.xdotool(['click', buttonNumber], operation, display);
   }
 
-  async typeText(text: string, delayMs = 0): Promise<void> {
+  async typeText(text: string, display: string, delayMs = 0): Promise<void> {
     const operation = 'input.type';
     if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > 10_000) {
       throw adapterError('INVALID_INPUT', operation, 'delayMs must be an integer between 0 and 10000.');
@@ -529,14 +552,14 @@ export class LocalComputerAdapter implements ComputerAdapter {
         maximum: this.config.desktop.maxTextBytes,
       });
     }
-    await this.xdotool(['type', '--clearmodifiers', '--delay', String(delayMs), '--', text], operation);
+    await this.xdotool(['type', '--clearmodifiers', '--delay', String(delayMs), '--', text], operation, display);
   }
 
-  async pressKey(key: string): Promise<void> {
+  async pressKey(key: string, display: string): Promise<void> {
     const operation = 'input.key';
     if (key.length === 0 || key.length > 256 || key.includes('\0')) {
       throw adapterError('INVALID_INPUT', operation, 'Key sequence is invalid.');
     }
-    await this.xdotool(['key', '--clearmodifiers', key], operation);
+    await this.xdotool(['key', '--clearmodifiers', key], operation, display);
   }
 }

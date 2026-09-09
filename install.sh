@@ -286,7 +286,6 @@ set -Eeuo pipefail
 : "${CHATGPT_MCP_REPO:?CHATGPT_MCP_REPO is required}"
 : "${CHATGPT_MCP_NODE_BIN:?CHATGPT_MCP_NODE_BIN is required}"
 export CHATGPT_MCP_CONFIG="$CHATGPT_MCP_REPO/config.local.json"
-if [[ -z "${DISPLAY:-}" && -S /tmp/.X11-unix/X0 ]]; then export DISPLAY=:0; fi
 if [[ -z "${XAUTHORITY:-}" && -f "$HOME/.Xauthority" ]]; then export XAUTHORITY="$HOME/.Xauthority"; fi
 exec "$CHATGPT_MCP_NODE_BIN" "$CHATGPT_MCP_REPO/dist/src/http.js"
 LAUNCHER

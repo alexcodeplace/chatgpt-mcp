@@ -14,6 +14,9 @@ const signalSchema = z.enum([
 ]);
 const serviceActionSchema = z.enum(['start', 'stop', 'restart']);
 const pointerButtonSchema = z.enum(['left', 'middle', 'right']);
+const displaySchema = z.string().min(1).max(255).refine(value => !/[\0\r\n]/.test(value), {
+  message: 'display must be a non-empty X11 DISPLAY value',
+});
 const MAX_TOOL_RESPONSE_BYTES = 6 * 1024 * 1024;
 
 const fileEntrySchema = z.object({
@@ -312,12 +315,12 @@ export function registerTools(
       'app.launch',
       {
         title: 'Launch Application',
-        description: 'Use this to launch one application by its configured name. Returns an explicit handle for later app.close.',
-        inputSchema: z.object({ name: z.string().min(1), args: z.array(z.string()).default([]) }),
-        outputSchema: z.object({ handle: z.string().min(1), pid: z.number().int().positive() }),
+        description: 'Use this to launch one application by its configured name on the caller-selected X11 DISPLAY. Returns an explicit handle for later app.close.',
+        inputSchema: z.object({ name: z.string().min(1), args: z.array(z.string()).default([]), display: displaySchema }),
+        outputSchema: z.object({ handle: z.string().min(1), pid: z.number().int().positive(), display: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ name, args }, ctx) => run('app.launch', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.launchApplication(name, args) })),
+      async ({ name, args, display }, ctx) => run('app.launch', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.launchApplication(name, args, display), display })),
     );
 
     server.registerTool(
@@ -341,14 +344,14 @@ export function registerTools(
       'browser.open',
       {
         title: 'Open Browser URL',
-        description: 'Use this to open a URL with the configured local browser opener when its URL scheme is allowed.',
-        inputSchema: z.object({ url: z.string().min(1) }),
-        outputSchema: z.object({ url: z.string() }),
+        description: 'Use this to open a URL with the configured local browser opener on the caller-selected X11 DISPLAY when its URL scheme is allowed.',
+        inputSchema: z.object({ url: z.string().min(1), display: displaySchema }),
+        outputSchema: z.object({ url: z.string(), display: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ url }, ctx) => run('browser.open', concurrency, ctx.mcpReq.signal, async () => {
-        await adapter.openBrowser(url);
-        return { url };
+      async ({ url, display }, ctx) => run('browser.open', concurrency, ctx.mcpReq.signal, async () => {
+        await adapter.openBrowser(url, display);
+        return { url, display };
       }),
     );
   }
@@ -358,20 +361,20 @@ export function registerTools(
       'screen.capture',
       {
         title: 'Capture Screen',
-        description: 'Use this to capture the current desktop screen as a PNG image.',
-        inputSchema: z.object({}),
-        outputSchema: z.object({ mimeType: z.literal('image/png'), bytes: z.number().int().nonnegative() }),
+        description: 'Use this to capture the caller-selected X11 DISPLAY as a PNG image.',
+        inputSchema: z.object({ display: displaySchema }),
+        outputSchema: z.object({ mimeType: z.literal('image/png'), bytes: z.number().int().nonnegative(), display: z.string() }),
         annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async (_args, ctx): Promise<CallToolResult> => {
+      async ({ display }, ctx): Promise<CallToolResult> => {
         try {
-          const capture = await concurrency.run('screen.capture', () => adapter.captureScreen(), ctx.mcpReq.signal);
+          const capture = await concurrency.run('screen.capture', () => adapter.captureScreen(display), ctx.mcpReq.signal);
           return enforceTransportBudget({
             content: [
-              { type: 'text', text: JSON.stringify({ mimeType: capture.mimeType, bytes: capture.bytes }) },
+              { type: 'text', text: JSON.stringify({ mimeType: capture.mimeType, bytes: capture.bytes, display }) },
               { type: 'image', data: capture.data, mimeType: capture.mimeType },
             ],
-            structuredContent: { mimeType: capture.mimeType, bytes: capture.bytes },
+            structuredContent: { mimeType: capture.mimeType, bytes: capture.bytes, display },
           }, 'screen.capture');
         } catch (error) {
           return failure(error, 'screen.capture');
@@ -385,14 +388,14 @@ export function registerTools(
       'input.move',
       {
         title: 'Move Pointer',
-        description: 'Use this to move the local desktop pointer to absolute screen coordinates.',
-        inputSchema: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative() }),
-        outputSchema: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative() }),
+        description: 'Use this to move the pointer on the caller-selected X11 DISPLAY to absolute screen coordinates.',
+        inputSchema: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), display: displaySchema }),
+        outputSchema: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), display: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async ({ x, y }, ctx) => run('input.move', concurrency, ctx.mcpReq.signal, async () => {
-        await adapter.movePointer(x, y);
-        return { x, y };
+      async ({ x, y, display }, ctx) => run('input.move', concurrency, ctx.mcpReq.signal, async () => {
+        await adapter.movePointer(x, y, display);
+        return { x, y, display };
       }),
     );
 
@@ -400,18 +403,19 @@ export function registerTools(
       'input.click',
       {
         title: 'Click Pointer',
-        description: 'Use this to click the local desktop pointer, optionally moving to absolute coordinates first.',
+        description: 'Use this to click the pointer on the caller-selected X11 DISPLAY, optionally moving to absolute coordinates first.',
         inputSchema: z.object({
           button: pointerButtonSchema.default('left'),
+          display: displaySchema,
           x: z.number().int().nonnegative().optional(),
           y: z.number().int().nonnegative().optional(),
         }).refine(value => (value.x === undefined) === (value.y === undefined), { message: 'x and y must be supplied together' }),
-        outputSchema: z.object({ button: pointerButtonSchema, x: z.number().int().nonnegative().optional(), y: z.number().int().nonnegative().optional() }),
+        outputSchema: z.object({ button: pointerButtonSchema, display: z.string(), x: z.number().int().nonnegative().optional(), y: z.number().int().nonnegative().optional() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ button, x, y }, ctx) => run('input.click', concurrency, ctx.mcpReq.signal, async () => {
-        await adapter.clickPointer(button, x, y);
-        return { button, ...(x === undefined ? {} : { x }), ...(y === undefined ? {} : { y }) };
+      async ({ button, display, x, y }, ctx) => run('input.click', concurrency, ctx.mcpReq.signal, async () => {
+        await adapter.clickPointer(button, display, x, y);
+        return { button, display, ...(x === undefined ? {} : { x }), ...(y === undefined ? {} : { y }) };
       }),
     );
 
@@ -419,14 +423,14 @@ export function registerTools(
       'input.type',
       {
         title: 'Type Text',
-        description: 'Use this to type literal text into the currently focused desktop application.',
-        inputSchema: z.object({ text: z.string(), delayMs: z.number().int().min(0).max(10_000).default(0) }),
-        outputSchema: z.object({ bytes: z.number().int().nonnegative(), delayMs: z.number().int().nonnegative() }),
+        description: 'Use this to type literal text into the focused application on the caller-selected X11 DISPLAY.',
+        inputSchema: z.object({ text: z.string(), display: displaySchema, delayMs: z.number().int().min(0).max(10_000).default(0) }),
+        outputSchema: z.object({ bytes: z.number().int().nonnegative(), delayMs: z.number().int().nonnegative(), display: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ text, delayMs }, ctx) => run('input.type', concurrency, ctx.mcpReq.signal, async () => {
-        await adapter.typeText(text, delayMs);
-        return { bytes: Buffer.byteLength(text, 'utf8'), delayMs };
+      async ({ text, display, delayMs }, ctx) => run('input.type', concurrency, ctx.mcpReq.signal, async () => {
+        await adapter.typeText(text, display, delayMs);
+        return { bytes: Buffer.byteLength(text, 'utf8'), delayMs, display };
       }),
     );
 
@@ -434,14 +438,14 @@ export function registerTools(
       'input.key',
       {
         title: 'Press Key',
-        description: 'Use this to send one xdotool-compatible key sequence to the focused desktop application.',
-        inputSchema: z.object({ key: z.string().min(1).max(256) }),
-        outputSchema: z.object({ key: z.string() }),
+        description: 'Use this to send one xdotool-compatible key sequence to the focused application on the caller-selected X11 DISPLAY.',
+        inputSchema: z.object({ key: z.string().min(1).max(256), display: displaySchema }),
+        outputSchema: z.object({ key: z.string(), display: z.string() }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ key }, ctx) => run('input.key', concurrency, ctx.mcpReq.signal, async () => {
-        await adapter.pressKey(key);
-        return { key };
+      async ({ key, display }, ctx) => run('input.key', concurrency, ctx.mcpReq.signal, async () => {
+        await adapter.pressKey(key, display);
+        return { key, display };
       }),
     );
   }
