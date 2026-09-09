@@ -11,6 +11,7 @@ test('installer keeps MCP lifetime independent from tunnel lifetime', async () =
 
   assert.match(install, /MCP_SERVICE_NAME="chatgpt-mcp\.service"/);
   assert.doesNotMatch(install, /export DISPLAY=/, 'installer must not choose a process-global DISPLAY for the MCP server');
+  assert.match(install, /UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET/, 'MCP service must strip inherited display routing');
   assert.match(install, /TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel-\$\{PROFILE_NAME\}\.service"/);
   assert.match(install, /--sample sample_mcp_remote_no_auth/);
   assert.match(install, /--mcp-server-url "http:\/\/127\.0\.0\.1:3210\/mcp"/);

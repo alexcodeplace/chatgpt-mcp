@@ -318,6 +318,7 @@ Type=simple
 WorkingDirectory=$REPO
 Environment=CHATGPT_MCP_REPO=$REPO
 Environment=CHATGPT_MCP_NODE_BIN=$(command -v node)
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET
 ExecStart=$USER_LIB/run-mcp-http.sh
 Restart=always
 RestartSec=1
