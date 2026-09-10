@@ -146,6 +146,21 @@ test('freeze-children blocks rename or removal of an existing direct child', asy
   }
 });
 
+test('freeze-children also blocks mutation of the protected root itself', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(
+      () => authorizePathEntryMutation(f.root, [{ path: f.root, mode: 'freeze-children', message: 'root protected' }], 'fs.move'),
+      (error: unknown) => {
+        const candidate = error as { code?: string; message?: string };
+        return candidate.code === 'PATH_NOT_ALLOWED' && candidate.message === 'root protected';
+      },
+    );
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
 test('shell mount policy freezes the parent and re-exposes existing non-symlink children', async () => {
   const f = await fixture();
   const existing = join(f.root, 'existing with spaces');

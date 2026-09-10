@@ -339,13 +339,22 @@ The installer also applies conservative systemd containment to the shared backen
         "message": "Creating folders at ~/Projects/ is not allowed. If you need to create a worktree, create it under .worktrees/ in the project folder you are working on."
       }
     ]
+  },
+  "execution": {
+    "localIsolation": {
+      "scope": "system",
+      "privilegeCommand": "sudo",
+      "privilegeArgs": ["-n"]
+    }
   }
 }
 ```
 
-`freeze-children` is structural rather than executable-specific. Native MCP writes, mkdir, moves, deletes, and recording-output creation are checked directly. Local `shell.exec` commands run in a transient mount namespace where the protected parent is read-only and each pre-existing non-symlink child is re-exposed read-write. As a result, direct `mkdir`, shell wrappers, Python/Node `mkdir`, `git clone`, `git worktree`, archive extraction, `cp`/`rsync`, and rename/re-parent tricks cannot create a new direct entry. Restricted shell children also lose access to the user systemd control sockets and run with `NoNewPrivileges=yes`, preventing a nested user service from escaping the mount namespace. If the protected path is missing, write-capable policy checks fail closed.
+`freeze-children` is structural rather than executable-specific. Native MCP writes, mkdir, moves, deletes, and recording-output creation are checked directly. When shell execution is enabled, blocklist enforcement requires `execution.localIsolation.scope: "system"`: each `shell.exec` runs as the MCP user's original UID/GID in a system-manager transient service where the protected parent is read-only and each pre-existing non-symlink child is re-exposed read-write. This avoids the UID remapping of unprivileged user mount namespaces and preserves normal SSH/Git behavior. As a result, direct `mkdir`, shell wrappers, Python/Node filesystem APIs, `git clone`, `git worktree`, archive extraction, `cp`/`rsync`, and rename/re-parent tricks cannot create a new direct entry.
 
-The optional `message` is returned verbatim for direct MCP policy denials and appended to shell stderr when the kernel reports the read-only-filesystem denial. Existing direct entries are intentionally protected from rename/removal as part of freezing the parent namespace; ordinary reads and writes inside existing project directories continue to work.
+Restricted shell children additionally run with `NoNewPrivileges=yes`, a private PID namespace, no `CAP_SYS_ADMIN`, mount syscalls filtered, and user/system systemd control sockets hidden. This closes privilege, nested-systemd, mount-namespace, and `/proc/<outside-pid>/root` escape paths. Caller environment values are staged through a root-only transient environment file so secrets are not exposed in the `sudo`/`systemd-run` argv. If the protected path is missing, write-capable policy checks fail closed.
+
+The optional `message` is returned verbatim for direct MCP policy denials and appended to shell stderr when the kernel reports the read-only-filesystem denial. Existing direct entries and the protected root itself are protected from rename/removal as part of freezing the parent namespace; ordinary reads and writes inside existing project directories continue to work. Because GUI application launch, browser launch, and desktop input can delegate filesystem changes to processes outside `shell.exec`, those tool surfaces are omitted while a filesystem blocklist is active; read-only screen capture remains available.
 
 ## Trust boundary
 

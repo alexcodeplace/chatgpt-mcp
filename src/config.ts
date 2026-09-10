@@ -157,8 +157,11 @@ const kubernetesSchema = z.object({
 
 const localIsolationSchema = z.object({
   enabled: z.boolean().default(false),
+  scope: z.enum(['user', 'system']).default('user'),
   command: z.string().min(1).default('systemd-run'),
   managerCommand: z.string().min(1).default('systemctl'),
+  privilegeCommand: z.string().min(1).default('sudo'),
+  privilegeArgs: z.array(z.string()).max(16).default(['-n']),
   tasksMax: z.number().int().min(16).max(65_536).default(512),
   memoryMaxBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(4 * 1024 * 1024 * 1024),
   cpuWeight: z.number().int().min(1).max(10_000).default(10),
@@ -169,7 +172,7 @@ const executionSchema = z.object({
   defaultBackend: z.literal('local').default('local'),
   lightweightTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
   lightweightOutputBytes: z.number().int().positive().max(16 * 1024 * 1024).default(1024 * 1024),
-  localIsolation: localIsolationSchema.default({ enabled: false, command: 'systemd-run', managerCommand: 'systemctl', tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }),
+  localIsolation: localIsolationSchema.default({ enabled: false, scope: 'user', command: 'systemd-run', managerCommand: 'systemctl', privilegeCommand: 'sudo', privilegeArgs: ['-n'], tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }),
   kubernetes: kubernetesSchema.default({
     enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [],
     remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24,
@@ -204,7 +207,7 @@ const httpSchema = z.object({
 });
 
 const configSchema = z.object({
-  execution: executionSchema.default({ defaultBackend: 'local', lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, localIsolation: { enabled: false, command: 'systemd-run', managerCommand: 'systemctl', tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
+  execution: executionSchema.default({ defaultBackend: 'local', lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, localIsolation: { enabled: false, scope: 'user', command: 'systemd-run', managerCommand: 'systemctl', privilegeCommand: 'sudo', privilegeArgs: ['-n'], tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
   concurrency: concurrencySchema.default({ maxConcurrent: 48, reservedControlSlots: 8, shellMaxConcurrent: 8, maxQueue: 64, queueTimeoutMs: 30_000 }),
   http: httpSchema.default({ host: '127.0.0.1', port: 3210, allowedHosts: [], allowedOrigins: [] }),
   filesystem: filesystemSchema.default({ read: false, write: false, roots: [], blocklist: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
@@ -227,6 +230,14 @@ const configSchema = z.object({
     maxTextBytes: 64 * 1024,
   }),
   logLevel: z.enum(['silent', 'error', 'warn', 'info', 'debug']).default('info'),
+}).superRefine((value, ctx) => {
+  if (value.shell.enabled && value.filesystem.blocklist.length > 0 && value.execution.localIsolation.scope !== 'system') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['execution', 'localIsolation', 'scope'],
+      message: 'filesystem blocklist with shell execution requires system-scope isolation',
+    });
+  }
 });
 
 export type ChatGptMcpConfig = z.infer<typeof configSchema>;

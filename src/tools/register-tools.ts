@@ -113,12 +113,12 @@ export function registerTools(
         processList: config.process.list,
         processKill: config.process.kill,
         service: config.service.enabled,
-        application: config.application.enabled && config.desktop.hostDisplayAccess,
-        browser: config.browser.enabled && config.desktop.hostDisplayAccess,
+        application: config.application.enabled && config.desktop.hostDisplayAccess && config.filesystem.blocklist.length === 0,
+        browser: config.browser.enabled && config.desktop.hostDisplayAccess && config.filesystem.blocklist.length === 0,
         hostDisplayAccess: config.desktop.hostDisplayAccess,
         screenCapture: config.desktop.hostDisplayAccess && config.desktop.screenCapture,
         screenRecording: config.desktop.hostDisplayAccess && config.desktop.screenRecording && config.filesystem.write && config.filesystem.roots.length > 0,
-        input: config.desktop.hostDisplayAccess && config.desktop.input,
+        input: config.desktop.hostDisplayAccess && config.desktop.input && config.filesystem.blocklist.length === 0,
       },
     })),
   );
@@ -311,7 +311,7 @@ export function registerTools(
     );
   }
 
-  if (config.application.enabled && config.desktop.hostDisplayAccess) {
+  if (config.application.enabled && config.desktop.hostDisplayAccess && config.filesystem.blocklist.length === 0) {
     server.registerTool(
       'app.launch',
       {
@@ -340,7 +340,7 @@ export function registerTools(
     );
   }
 
-  if (config.browser.enabled && config.desktop.hostDisplayAccess) {
+  if (config.browser.enabled && config.desktop.hostDisplayAccess && config.filesystem.blocklist.length === 0) {
     server.registerTool(
       'browser.open',
       {
@@ -423,7 +423,7 @@ export function registerTools(
     );
   }
 
-  if (config.desktop.hostDisplayAccess && config.desktop.input) {
+  if (config.desktop.hostDisplayAccess && config.desktop.input && config.filesystem.blocklist.length === 0) {
     server.registerTool(
       'input.move',
       {

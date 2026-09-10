@@ -114,6 +114,17 @@ export async function authorizePathEntryMutation(
 ): Promise<void> {
   if (rules.length === 0) return;
   const candidate = resolve(requestedPath);
+  for (const rule of rules) {
+    if (rule.mode !== 'freeze-children') continue;
+    const configured = resolve(rule.path);
+    if (candidate === configured) blocked(rule, operation, candidate);
+    try {
+      const candidateReal = await realpath(candidate);
+      if (candidateReal === await canonicalRulePath(rule, operation)) blocked(rule, operation, candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
   const rule = await frozenParentRuleFor(dirname(candidate), rules, operation);
   if (rule !== undefined) blocked(rule, operation, candidate);
 }
@@ -168,6 +179,14 @@ export async function buildFilesystemMountPolicy(
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         }
+      }
+    }
+    for (const socketPath of ['/run/systemd/private', '/run/dbus/system_bus_socket']) {
+      try {
+        await lstat(socketPath);
+        inaccessiblePaths.add(socketPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
     }
   }

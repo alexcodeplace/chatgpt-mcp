@@ -45,6 +45,15 @@ function requireCapability(enabled: boolean, operation: string, message: string)
   if (!enabled) throw adapterError('CAPABILITY_DISABLED', operation, message);
 }
 
+function requireNoFilesystemBlocklist(config: Readonly<ChatGptMcpConfig>, operation: string, capability: string): void {
+  if (config.filesystem.blocklist.length === 0) return;
+  throw adapterError(
+    'CAPABILITY_DISABLED',
+    operation,
+    `${capability} is disabled while a filesystem blocklist is active because it could execute filesystem mutations outside the enforced shell sandbox.`,
+  );
+}
+
 function fileType(stats: Awaited<ReturnType<typeof lstat>>): FileEntryType {
   if (stats.isFile()) return 'file';
   if (stats.isDirectory()) return 'directory';
@@ -375,6 +384,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     const operation = 'app.launch';
     requireCapability(this.config.application.enabled, operation, 'Application launching is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    requireNoFilesystemBlocklist(this.config, operation, 'Application launching');
     const desktopEnv = this.desktopEnvironment(display, operation);
     const definition = this.config.application.applications[name];
     if (definition === undefined) {
@@ -441,6 +451,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     const operation = 'browser.open';
     requireCapability(this.config.browser.enabled, operation, 'Browser opening is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    requireNoFilesystemBlocklist(this.config, operation, 'Browser launching');
     const desktopEnv = this.desktopEnvironment(display, operation);
     if (Buffer.byteLength(rawUrl, 'utf8') > MAX_URL_BYTES) {
       throw adapterError('INVALID_INPUT', operation, 'URL exceeds the implementation byte limit.');
@@ -692,6 +703,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
   private async xdotool(args: readonly string[], operation: string, display: string): Promise<void> {
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.input, operation, 'Desktop input is disabled.');
+    requireNoFilesystemBlocklist(this.config, operation, 'Desktop input');
     try {
       await requireSuccessfulCommand('xdotool', args, operation, Math.min(30_000, this.config.execution.lightweightTimeoutMs), this.desktopEnvironment(display, operation), this.config.execution.lightweightOutputBytes);
     } catch (error) {

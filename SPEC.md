@@ -371,8 +371,11 @@ Requirements:
 8. `freeze-children` MUST prevent adding, removing, or renaming direct entries of the configured path while allowing ordinary access inside entries that already exist;
 9. direct MCP filesystem mutations that could create a path MUST check the nearest existing ancestor so recursive creation cannot skip the protected parent;
 10. local `shell.exec` MUST enforce `freeze-children` below executable parsing, using an OS filesystem boundary rather than a list of commands such as `mkdir`;
-11. shell enforcement MUST preserve write access inside existing non-symlink children, fail closed if the protected parent is missing, and prevent a child from escaping through the per-user systemd manager;
-12. when a blocklist rule contains `message`, direct MCP policy errors MUST return it verbatim and shell denials SHOULD surface it alongside the OS denial.
+11. shell enforcement MUST preserve write access inside existing non-symlink children, fail closed if the protected parent is missing, and use system-scope isolation when shell execution is enabled so host UID/GID ownership remains intact;
+12. system-scope shell enforcement MUST prevent privilege gain, mount reversal, nested systemd delegation, and `/proc` access to processes outside the command PID namespace;
+13. caller environment values passed to a privileged system-scope executor MUST NOT be placed in the privileged launcher argv;
+14. tool surfaces capable of delegating arbitrary GUI-side filesystem mutation (`app.launch`, `browser.open`, and `input.*`) MUST fail closed or be omitted while a blocklist is active unless they are subjected to equivalent filesystem enforcement;
+15. when a blocklist rule contains `message`, direct MCP policy errors MUST return it verbatim and shell denials SHOULD surface it alongside the OS denial.
 
 The filesystem policy implementation is a single reusable module used by every filesystem operation and by `cwd` validation for `shell.exec`. `freeze-children` is intentionally structural: it protects the parent directory-entry namespace, not merely the `mkdir` executable. Implementations must therefore cover equivalent creation/re-parenting paths such as language runtime APIs, Git worktree/clone operations, archive extraction, copy/sync tools, and rename/move.
 

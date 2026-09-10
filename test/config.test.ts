@@ -102,12 +102,31 @@ test('malformed configuration fails closed', () => {
 });
 
 
+
+test('filesystem blocklist with shell execution requires system-scope local isolation', () => {
+  assert.throws(
+    () => parseConfig({
+      filesystem: { blocklist: [{ path: '/tmp' }] },
+      shell: { enabled: true, allowedCommands: ['*'] },
+    }),
+    /requires system-scope isolation/,
+  );
+  assert.doesNotThrow(() => parseConfig({
+    filesystem: { blocklist: [{ path: '/tmp' }] },
+    shell: { enabled: true, allowedCommands: ['*'] },
+    execution: { localIsolation: { scope: 'system' } },
+  }));
+});
+
 test('Kubernetes execution is strictly opt-in and local-only by default', () => {
   const config = parseConfig({});
   assert.equal(config.execution.defaultBackend, 'local');
   assert.equal(config.execution.lightweightTimeoutMs, 30_000);
   assert.equal(config.execution.lightweightOutputBytes, 1024 * 1024);
   assert.equal(config.execution.localIsolation.enabled, false);
+  assert.equal(config.execution.localIsolation.scope, 'user');
+  assert.equal(config.execution.localIsolation.privilegeCommand, 'sudo');
+  assert.deepEqual(config.execution.localIsolation.privilegeArgs, ['-n']);
   assert.equal(config.execution.localIsolation.tasksMax, 512);
   assert.equal(config.execution.localIsolation.memoryMaxBytes, 4 * 1024 * 1024 * 1024);
   assert.equal(config.execution.localIsolation.cpuWeight, 10);
@@ -219,6 +238,7 @@ test('Kubernetes preparation predicates reject workspace traversal', () => {
 test('local systemd isolation is explicitly opt-in and resource bounded', () => {
   const config = parseConfig({ execution: { localIsolation: { enabled: true, tasksMax: 768, memoryMaxBytes: 2147483648, cpuWeight: 20, stopTimeoutMs: 5000 } } });
   assert.equal(config.execution.localIsolation.enabled, true);
+  assert.equal(config.execution.localIsolation.scope, 'user');
   assert.equal(config.execution.localIsolation.command, 'systemd-run');
   assert.equal(config.execution.localIsolation.managerCommand, 'systemctl');
   assert.equal(config.execution.localIsolation.tasksMax, 768);
