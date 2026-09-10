@@ -2,10 +2,17 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as z from 'zod/v4';
 
+const filesystemBlocklistEntrySchema = z.object({
+  path: z.string().min(1),
+  mode: z.literal('freeze-children').default('freeze-children'),
+  message: z.string().min(1).max(4096).optional(),
+});
+
 const filesystemSchema = z.object({
   read: z.boolean().default(false),
   write: z.boolean().default(false),
   roots: z.array(z.string().min(1)).default([]),
+  blocklist: z.array(filesystemBlocklistEntrySchema).max(256).default([]),
   maxReadBytes: z.number().int().positive().max(64 * 1024 * 1024).default(1024 * 1024),
   maxWriteBytes: z.number().int().positive().max(64 * 1024 * 1024).default(4 * 1024 * 1024),
 });
@@ -200,7 +207,7 @@ const configSchema = z.object({
   execution: executionSchema.default({ defaultBackend: 'local', lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, localIsolation: { enabled: false, command: 'systemd-run', managerCommand: 'systemctl', tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
   concurrency: concurrencySchema.default({ maxConcurrent: 48, reservedControlSlots: 8, shellMaxConcurrent: 8, maxQueue: 64, queueTimeoutMs: 30_000 }),
   http: httpSchema.default({ host: '127.0.0.1', port: 3210, allowedHosts: [], allowedOrigins: [] }),
-  filesystem: filesystemSchema.default({ read: false, write: false, roots: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
+  filesystem: filesystemSchema.default({ read: false, write: false, roots: [], blocklist: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
   shell: shellSchema.default({ enabled: false, allowedCommands: [], maxRuntimeMs: 120_000, maxOutputBytes: 4 * 1024 * 1024, allowEnvironment: false }),
   process: processSchema.default({ list: false, kill: false }),
   service: serviceSchema.default({ enabled: false, allowedServices: [], command: 'systemctl', maxRuntimeMs: 30_000 }),
@@ -246,6 +253,7 @@ function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
     filesystem: {
       ...config.filesystem,
       roots: config.filesystem.roots.map(root => resolve(root)),
+      blocklist: config.filesystem.blocklist.map(rule => ({ ...rule, path: resolve(rule.path) })),
     },
     browser: {
       ...config.browser,

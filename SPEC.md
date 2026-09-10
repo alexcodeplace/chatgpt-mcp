@@ -325,6 +325,11 @@ Example configuration shape:
     "read": true,
     "write": true,
     "roots": ["/home/alex/projects", "/home/alex/Downloads"],
+    "blocklist": [{
+      "path": "/home/alex/projects",
+      "mode": "freeze-children",
+      "message": "Create worktrees under .worktrees/ in the current project."
+    }],
     "maxReadBytes": 1048576,
     "maxWriteBytes": 4194304
   },
@@ -361,9 +366,15 @@ Requirements:
 3. prevent `..` traversal from escaping a root;
 4. account for symlinks when accessing existing paths so a symlink cannot silently escape an allowed root;
 5. for creation paths, validate the nearest existing ancestor before creation;
-6. never duplicate root-check logic independently across tools.
+6. never duplicate root-check logic independently across tools;
+7. apply `filesystem.blocklist` rules after root authorization;
+8. `freeze-children` MUST prevent adding, removing, or renaming direct entries of the configured path while allowing ordinary access inside entries that already exist;
+9. direct MCP filesystem mutations that could create a path MUST check the nearest existing ancestor so recursive creation cannot skip the protected parent;
+10. local `shell.exec` MUST enforce `freeze-children` below executable parsing, using an OS filesystem boundary rather than a list of commands such as `mkdir`;
+11. shell enforcement MUST preserve write access inside existing non-symlink children, fail closed if the protected parent is missing, and prevent a child from escaping through the per-user systemd manager;
+12. when a blocklist rule contains `message`, direct MCP policy errors MUST return it verbatim and shell denials SHOULD surface it alongside the OS denial.
 
-The filesystem policy implementation is a single reusable module used by every filesystem operation and by `cwd` validation for `shell.exec`.
+The filesystem policy implementation is a single reusable module used by every filesystem operation and by `cwd` validation for `shell.exec`. `freeze-children` is intentionally structural: it protects the parent directory-entry namespace, not merely the `mkdir` executable. Implementations must therefore cover equivalent creation/re-parenting paths such as language runtime APIs, Git worktree/clone operations, archive extraction, copy/sync tools, and rename/move.
 
 ## 10. Command execution rules
 

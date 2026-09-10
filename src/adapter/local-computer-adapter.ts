@@ -5,7 +5,7 @@ import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
-import { authorizePath } from '../policy/filesystem.js';
+import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, buildFilesystemMountPolicy } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
 import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
 import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
@@ -190,6 +190,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
     try {
       const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
       const flag = mode === 'create' ? 'wx' : mode === 'append' ? 'a' : 'w';
       await writeFile(path, content, { encoding: 'utf8', flag });
     } catch (error) {
@@ -202,6 +203,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
     try {
       const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
       await mkdir(path, { recursive });
     } catch (error) {
       mapOsError(error, operation, { path: requestedPath });
@@ -214,6 +216,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
     try {
       const source = await authorizePath(requestedSource, this.config.filesystem.roots, operation);
       const destination = await authorizePath(requestedDestination, this.config.filesystem.roots, operation);
+      await authorizePathEntryMutation(source, this.config.filesystem.blocklist, operation);
+      await authorizePathEntryMutation(destination, this.config.filesystem.blocklist, operation);
       await rename(source, destination);
     } catch (error) {
       mapOsError(error, operation, { source: requestedSource, destination: requestedDestination });
@@ -225,6 +229,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
     try {
       const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
       const metadata = await lstat(path);
       if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
         if (recursive) await rm(path, { recursive: true, force: false });
@@ -246,6 +251,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
     const env = validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
+    const filesystemMountPolicy = await buildFilesystemMountPolicy(this.config.filesystem.blocklist, operation);
     const options = {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
@@ -254,10 +260,15 @@ export class LocalComputerAdapter implements ComputerAdapter {
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       operation,
     };
-    if (this.config.execution.localIsolation.enabled) {
-      return spawnSystemdIsolated(request.command, request.args, options, this.config.execution.localIsolation);
+    const useSystemdIsolation = this.config.execution.localIsolation.enabled || filesystemMountPolicy.readOnlyPaths.length > 0;
+    const result = useSystemdIsolation
+      ? await spawnSystemdIsolated(request.command, request.args, options, this.config.execution.localIsolation, filesystemMountPolicy)
+      : await spawnBounded(request.command, request.args, options);
+    if (filesystemMountPolicy.messages.length > 0 && /(?:Read-only file system|\bEROFS\b)/i.test(result.stderr)) {
+      const notice = filesystemMountPolicy.messages.map(message => `Policy: ${message}`).join('\n');
+      return { ...result, stderr: `${result.stderr.replace(/\s+$/, '')}\n${notice}\n` };
     }
-    return spawnBounded(request.command, request.args, options);
+    return result;
   }
 
   async listProcesses(): Promise<readonly ProcessInfo[]> {
@@ -531,6 +542,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
 
     const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+    await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
     try {
       const parent = await stat(dirname(path));
       if (!parent.isDirectory()) {

@@ -74,6 +74,7 @@
       "/home/YOU/projects",
       "/home/YOU/Downloads"
     ],
+    "blocklist": [],
     "maxReadBytes": 1048576,
     "maxWriteBytes": 4194304
   },

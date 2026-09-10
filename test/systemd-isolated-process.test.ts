@@ -22,3 +22,26 @@ test('systemd isolation builds bounded argument-array execution without exposing
   assert.equal(args.some(value => value.includes('do-not-leak')), false);
   assert.deepEqual(args.slice(-4), ['--', 'git', 'status', '--short']);
 });
+
+test('systemd isolation applies filesystem blocklist mounts and escape hardening', () => {
+  const isolation = parseConfig({ execution: { localIsolation: { enabled: false } } }).execution.localIsolation;
+  const args = buildSystemdRunArgs(
+    'chatgpt-mcp-exec-policy-test',
+    'mkdir',
+    ['/tmp/projects/new'],
+    { cwd: '/tmp' },
+    isolation,
+    {
+      readOnlyPaths: ['/tmp/projects'],
+      readWritePaths: ['/tmp/projects/existing', '/tmp/projects/project with spaces'],
+      inaccessiblePaths: ['/run/user/1000/systemd/private', '/run/user/1000/bus'],
+      messages: ['blocked'],
+    },
+  );
+  assert.ok(args.includes('--property=NoNewPrivileges=yes'));
+  assert.ok(args.includes('--property=ReadOnlyPaths="/tmp/projects"'));
+  assert.ok(args.includes('--property=ReadWritePaths="/tmp/projects/existing"'));
+  assert.ok(args.includes('--property=ReadWritePaths="/tmp/projects/project with spaces"'));
+  assert.ok(args.includes('--property=InaccessiblePaths="/run/user/1000/systemd/private"'));
+  assert.ok(args.includes('--property=InaccessiblePaths="/run/user/1000/bus"'));
+});

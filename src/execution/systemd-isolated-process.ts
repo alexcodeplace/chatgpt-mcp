@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { ChatGptMcpConfig } from '../config.js';
 import type { ExecResult } from '../adapter/computer-adapter.js';
+import type { FilesystemMountPolicy } from '../policy/filesystem.js';
 import { spawnBounded, type BoundedProcessOptions } from './bounded-process.js';
 
 type LocalIsolationConfig = Readonly<ChatGptMcpConfig['execution']['localIsolation']>;
@@ -14,6 +15,7 @@ export function buildSystemdRunArgs(
   args: readonly string[],
   options: Pick<BoundedProcessOptions, 'cwd' | 'env'>,
   isolation: LocalIsolationConfig,
+  filesystem?: FilesystemMountPolicy,
 ): string[] {
   const runArgs = [
     '--user',
@@ -29,6 +31,18 @@ export function buildSystemdRunArgs(
     '--property=SendSIGKILL=yes',
     '--property=TimeoutStopSec=1s',
   ];
+  if (filesystem !== undefined && filesystem.readOnlyPaths.length > 0) {
+    runArgs.push('--property=NoNewPrivileges=yes');
+    for (const path of filesystem.readOnlyPaths) {
+      runArgs.push(`--property=ReadOnlyPaths=${JSON.stringify(path)}`);
+    }
+    for (const path of filesystem.readWritePaths) {
+      runArgs.push(`--property=ReadWritePaths=${JSON.stringify(path)}`);
+    }
+    for (const path of filesystem.inaccessiblePaths) {
+      runArgs.push(`--property=InaccessiblePaths=${JSON.stringify(path)}`);
+    }
+  }
   if (options.cwd !== undefined) runArgs.push(`--working-directory=${options.cwd}`);
   if (options.env !== undefined) {
     for (const key of Object.keys(options.env).sort()) runArgs.push(`--setenv=${key}`);
@@ -71,9 +85,10 @@ export async function spawnSystemdIsolated(
   args: readonly string[],
   options: BoundedProcessOptions,
   isolation: LocalIsolationConfig,
+  filesystem?: FilesystemMountPolicy,
 ): Promise<ExecResult> {
   const unit = `${UNIT_PREFIX}-${process.pid}-${randomUUID().replaceAll('-', '')}`;
-  const systemdArgs = buildSystemdRunArgs(unit, command, args, options, isolation);
+  const systemdArgs = buildSystemdRunArgs(unit, command, args, options, isolation, filesystem);
   try {
     return await spawnBounded(isolation.command, systemdArgs, {
       ...options,

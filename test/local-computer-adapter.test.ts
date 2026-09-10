@@ -90,6 +90,50 @@ test('filesystem lifecycle stays inside configured root', async () => {
   }
 });
 
+test('filesystem blocklist freezes direct entries while allowing work inside existing children', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-blocklist-adapter-'));
+  const existing = join(root, 'existing-project');
+  await import('node:fs/promises').then(({ mkdir }) => mkdir(existing));
+  const message = 'Creating folders at ~/Projects/ is not allowed. if you need to create a worktree, create it under .worktrees/ in the project folder you are working on';
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: {
+      read: true,
+      write: true,
+      roots: [root],
+      blocklist: [{ path: root, message }],
+      maxReadBytes: 1024,
+      maxWriteBytes: 1024,
+    },
+  }));
+  try {
+    await assert.rejects(
+      () => adapter.makeDirectory(join(root, 'new-project'), false),
+      (error: unknown) => {
+        const candidate = error as { code?: string; message?: string };
+        return candidate.code === 'PATH_NOT_ALLOWED' && candidate.message === message;
+      },
+    );
+    await assert.rejects(
+      () => adapter.writeFile(join(root, 'new-file.txt'), 'x', 'create'),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    const nested = join(existing, 'nested');
+    await adapter.makeDirectory(nested, false);
+    await adapter.writeFile(join(nested, 'ok.txt'), 'ok', 'create');
+    assert.equal(await adapter.readFile(join(nested, 'ok.txt')), 'ok');
+    await assert.rejects(
+      () => adapter.movePath(existing, join(root, 'renamed-project')),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => adapter.deletePath(existing, true),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('filesystem read and write limits fail closed', async () => {
   const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-limits-'));
   const config = parseConfig({

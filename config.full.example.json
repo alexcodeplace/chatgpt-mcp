@@ -73,6 +73,7 @@
     "roots": [
       "/"
     ],
+    "blocklist": [],
     "maxReadBytes": 4194304,
     "maxWriteBytes": 4194304
   },

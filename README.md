@@ -325,6 +325,28 @@ GET /metrics  JSON limits, active/queued counts, peaks, and overload/cancellatio
 
 The installer also applies conservative systemd containment to the shared backend (`TimeoutStopSec=5`, `TasksMax=512`, `LimitNOFILE=65536`, `MemoryHigh=6G`, `MemoryMax=9G`, `CPUWeight=80`). HTTP shutdown gives in-flight connections two seconds to drain before they are force-closed, preventing a restart from hanging behind a large request backlog. These are last-resort host guardrails; normal overload should be handled by admission control first. The tunnel watchdog intentionally checks `/healthz`, not `/readyz`, so a healthy busy server is never restarted merely for being saturated.
 
+## Filesystem blocklist
+
+`filesystem.blocklist` can freeze the direct entries of selected directories while leaving the contents of entries that already exist writable. This is intended for owner-controlled namespace boundaries such as a project root where agents may work inside existing repositories but must not create sibling repositories or ad-hoc worktrees.
+
+```json
+{
+  "filesystem": {
+    "blocklist": [
+      {
+        "path": "/home/YOU/Projects",
+        "mode": "freeze-children",
+        "message": "Creating folders at ~/Projects/ is not allowed. If you need to create a worktree, create it under .worktrees/ in the project folder you are working on."
+      }
+    ]
+  }
+}
+```
+
+`freeze-children` is structural rather than executable-specific. Native MCP writes, mkdir, moves, deletes, and recording-output creation are checked directly. Local `shell.exec` commands run in a transient mount namespace where the protected parent is read-only and each pre-existing non-symlink child is re-exposed read-write. As a result, direct `mkdir`, shell wrappers, Python/Node `mkdir`, `git clone`, `git worktree`, archive extraction, `cp`/`rsync`, and rename/re-parent tricks cannot create a new direct entry. Restricted shell children also lose access to the user systemd control sockets and run with `NoNewPrivileges=yes`, preventing a nested user service from escaping the mount namespace. If the protected path is missing, write-capable policy checks fail closed.
+
+The optional `message` is returned verbatim for direct MCP policy denials and appended to shell stderr when the kernel reports the read-only-filesystem denial. Existing direct entries are intentionally protected from rename/removal as part of freezing the parent namespace; ordinary reads and writes inside existing project directories continue to work.
+
 ## Trust boundary
 
 - Filesystem operations pass through central path authorization that rejects traversal, sibling-prefix tricks, and symlink escapes.

@@ -19,6 +19,7 @@ test('safe defaults expose no action capability authority', () => {
   assert.equal(config.filesystem.read, false);
   assert.equal(config.filesystem.write, false);
   assert.deepEqual(config.filesystem.roots, []);
+  assert.deepEqual(config.filesystem.blocklist, []);
   assert.equal(config.shell.enabled, false);
   assert.deepEqual(config.shell.allowedCommands, []);
   assert.equal(config.process.list, false);
@@ -37,7 +38,7 @@ test('safe defaults expose no action capability authority', () => {
 
 test('parsed configuration is deeply frozen', () => {
   const config = parseConfig({
-    filesystem: { roots: ['/tmp'] },
+    filesystem: { roots: ['/tmp'], blocklist: [{ path: '/tmp', message: 'blocked' }] },
     shell: { allowedCommands: ['node'] },
     service: { allowedServices: ['nginx'] },
     application: { applications: { editor: { command: 'editor', args: ['--new-window'] } } },
@@ -46,12 +47,23 @@ test('parsed configuration is deeply frozen', () => {
   assert.equal(Object.isFrozen(config.http), true);
   assert.equal(Object.isFrozen(config.filesystem), true);
   assert.equal(Object.isFrozen(config.filesystem.roots), true);
+  assert.equal(Object.isFrozen(config.filesystem.blocklist), true);
+  assert.equal(Object.isFrozen(config.filesystem.blocklist[0]), true);
   assert.equal(Object.isFrozen(config.shell.allowedCommands), true);
   assert.equal(Object.isFrozen(config.service.allowedServices), true);
   assert.equal(Object.isFrozen(config.application.applications), true);
   assert.equal(Object.isFrozen(config.application.applications.editor), true);
   assert.equal(Object.isFrozen(config.application.applications.editor?.args), true);
   assert.equal(Object.isFrozen(config.browser.allowedSchemes), true);
+});
+
+
+test('filesystem blocklist normalizes paths and defaults to freeze-children mode', () => {
+  const config = parseConfig({ filesystem: { blocklist: [{ path: './relative-policy', message: 'Use the project .worktrees directory.' }] } });
+  assert.equal(config.filesystem.blocklist.length, 1);
+  assert.equal(config.filesystem.blocklist[0]?.mode, 'freeze-children');
+  assert.equal(config.filesystem.blocklist[0]?.path.endsWith('/relative-policy'), true);
+  assert.equal(config.filesystem.blocklist[0]?.message, 'Use the project .worktrees directory.');
 });
 
 test('environment overrides file transport settings', async () => {
