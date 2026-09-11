@@ -16,7 +16,7 @@ local operating system
 
 ChatGPT chooses which tool to call. `chatgpt-mcp` validates the call against the local capability configuration and performs the operation. It is a thin protocol adapter, not a second planner, and it does not add its own interactive approval loop.
 
-Architecture: [`SPEC.md`](./SPEC.md). Delivery history: [`PLAN.md`](./PLAN.md). Detailed ChatGPT/tunnel guide: [`docs/CHATGPT.md`](./docs/CHATGPT.md).
+Architecture: [`SPEC.md`](./SPEC.md). Detailed ChatGPT/tunnel guide: [`docs/CHATGPT.md`](./docs/CHATGPT.md).
 
 ## Capabilities
 
