@@ -10,11 +10,13 @@ import {
   toNodeHandler,
 } from '@modelcontextprotocol/node';
 import type { ComputerAdapter } from './adapter/computer-adapter.js';
-import { LocalComputerAdapter } from './adapter/local-computer-adapter.js';
+import { RoutingComputerAdapter } from './adapter/routing-computer-adapter.js';
 import type { ChatGptMcpConfig } from './config.js';
+import { ConcurrencyController } from './concurrency.js';
 import { createComputerMcpServerFactory } from './server.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const HTTP_SHUTDOWN_GRACE_MS = 2_000;
 
 export interface RunningHttpServer {
   server: NodeHttpServer;
@@ -85,9 +87,10 @@ function validators(config: Readonly<ChatGptMcpConfig>): {
 
 export function createComputerHttpServer(
   config: Readonly<ChatGptMcpConfig>,
-  adapter: ComputerAdapter = new LocalComputerAdapter(config),
+  adapter: ComputerAdapter = new RoutingComputerAdapter(config),
+  concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency, config.execution.kubernetes.maxConcurrent),
 ): { server: NodeHttpServer; closeHandler(): Promise<void> } {
-  const handler = createMcpHandler(createComputerMcpServerFactory(config, adapter), {
+  const handler = createMcpHandler(createComputerMcpServerFactory(config, adapter, concurrency), {
     legacy: 'stateless',
     responseMode: 'json',
   });
@@ -104,6 +107,21 @@ export function createComputerHttpServer(
         return;
       }
       writeJson(res, 200, { ok: true, service: '@platform-modules/chatgpt-mcp' });
+      return;
+    }
+
+    if (pathname === '/readyz' || pathname === '/metrics') {
+      if (req.method !== 'GET') {
+        writeJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+        return;
+      }
+      const snapshot = concurrency.snapshot();
+      if (pathname === '/readyz') {
+        const ready = snapshot.status !== 'overloaded';
+        writeJson(res, ready ? 200 : 503, { ok: ready, service: '@platform-modules/chatgpt-mcp', concurrency: snapshot });
+      } else {
+        writeJson(res, 200, { service: '@platform-modules/chatgpt-mcp', concurrency: snapshot, ...(adapter.executionMetrics === undefined ? {} : { execution: adapter.executionMetrics() }) });
+      }
       return;
     }
 
@@ -129,7 +147,7 @@ export function createComputerHttpServer(
 
 export async function startComputerHttpServer(
   config: Readonly<ChatGptMcpConfig>,
-  adapter: ComputerAdapter = new LocalComputerAdapter(config),
+  adapter: ComputerAdapter = new RoutingComputerAdapter(config),
 ): Promise<RunningHttpServer> {
   const { server, closeHandler } = createComputerHttpServer(config, adapter);
   server.listen(config.http.port, config.http.host);
@@ -149,10 +167,17 @@ export async function startComputerHttpServer(
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
-      await new Promise<void>((resolve, reject) => {
+      const serverClosed = new Promise<void>((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve());
       });
-      await closeHandler();
+      server.closeIdleConnections();
+      const forceTimer = setTimeout(() => server.closeAllConnections(), HTTP_SHUTDOWN_GRACE_MS);
+      forceTimer.unref();
+      try {
+        await Promise.all([serverClosed, closeHandler()]);
+      } finally {
+        clearTimeout(forceTimer);
+      }
     },
   };
 }

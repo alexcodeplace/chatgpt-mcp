@@ -7,6 +7,43 @@ import test from 'node:test';
 import { LocalComputerAdapter } from '../src/adapter/local-computer-adapter.js';
 import { parseConfig } from '../src/config.js';
 
+
+async function waitForPidFile(path: string): Promise<number> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const value = Number((await readFile(path, 'utf8')).trim());
+      if (Number.isInteger(value) && value > 0) return value;
+    } catch {
+      // Process has not written the file yet.
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for child PID file: ${path}`);
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`Descendant process ${pid} survived bounded command termination.`);
+}
+
+function descendantScript(): string {
+  return [
+    `const {spawn}=require('node:child_process');`,
+    `const {writeFileSync}=require('node:fs');`,
+    `const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});`,
+    `writeFileSync(process.argv[1],String(child.pid));`,
+    `setInterval(()=>{},1000);`,
+  ].join('');
+}
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-adapter-'));
   const config = parseConfig({
@@ -48,6 +85,50 @@ test('filesystem lifecycle stays inside configured root', async () => {
     assert.equal(await readFile(moved, 'utf8'), 'one+two');
     await adapter.deletePath(moved, false);
     await adapter.deletePath(directory, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('filesystem blocklist freezes direct entries while allowing work inside existing children', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-blocklist-adapter-'));
+  const existing = join(root, 'existing-project');
+  await import('node:fs/promises').then(({ mkdir }) => mkdir(existing));
+  const message = 'Creating folders at ~/Projects/ is not allowed. if you need to create a worktree, create it under .worktrees/ in the project folder you are working on';
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: {
+      read: true,
+      write: true,
+      roots: [root],
+      blocklist: [{ path: root, message }],
+      maxReadBytes: 1024,
+      maxWriteBytes: 1024,
+    },
+  }));
+  try {
+    await assert.rejects(
+      () => adapter.makeDirectory(join(root, 'new-project'), false),
+      (error: unknown) => {
+        const candidate = error as { code?: string; message?: string };
+        return candidate.code === 'PATH_NOT_ALLOWED' && candidate.message === message;
+      },
+    );
+    await assert.rejects(
+      () => adapter.writeFile(join(root, 'new-file.txt'), 'x', 'create'),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    const nested = join(existing, 'nested');
+    await adapter.makeDirectory(nested, false);
+    await adapter.writeFile(join(nested, 'ok.txt'), 'ok', 'create');
+    assert.equal(await adapter.readFile(join(nested, 'ok.txt')), 'ok');
+    await assert.rejects(
+      () => adapter.movePath(existing, join(root, 'renamed-project')),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => adapter.deletePath(existing, true),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -189,6 +270,27 @@ test('host display denial strips inherited desktop session environment from shel
   }
 });
 
+test('shell exec blocks obvious host capture bypasses before process spawn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-capture-guard-'));
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { roots: [root] },
+    shell: { enabled: true, allowedCommands: ['*'], maxRuntimeMs: 2_000, maxOutputBytes: 4096, allowEnvironment: true },
+    desktop: { hostDisplayAccess: false },
+  }));
+  try {
+    await assert.rejects(
+      () => adapter.exec({ command: 'python3', args: ['-c', 'import pyautogui; pyautogui.screenshot()'], cwd: root }),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => adapter.exec({ command: 'bash', args: ['-lc', 'ffmpeg -f x11grab -i :0 /tmp/shot.png'], cwd: root }),
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'COMMAND_NOT_ALLOWED',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('process listing includes the current test process', async () => {
   const { root, adapter } = await fixture();
   try {
@@ -213,6 +315,50 @@ test('process kill terminates a disposable child', async () => {
     assert.notEqual(child.exitCode, 0);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('shell cancellation terminates the complete descendant process group', { skip: process.platform === 'win32' }, async () => {
+  const { root, adapter } = await fixture();
+  const pidFile = join(root, 'cancel-child.pid');
+  const abort = new AbortController();
+  try {
+    const execution = adapter.exec({
+      command: 'node',
+      args: ['-e', descendantScript(), pidFile],
+      cwd: root,
+      timeoutMs: 2_000,
+      signal: abort.signal,
+    });
+    const childPid = await waitForPidFile(pidFile);
+    abort.abort();
+    await assert.rejects(
+      () => execution,
+      (error: unknown) => typeof error === 'object' && error !== null && (error as { code?: string }).code === 'CANCELLED',
+    );
+    await waitForProcessExit(childPid);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shell timeout terminates descendants in the command process group', { skip: process.platform === 'win32' }, async () => {
+  const { root, adapter } = await fixture();
+  const pidFile = join(root, 'timeout-child.pid');
+  try {
+    const execution = adapter.exec({
+      command: 'node',
+      args: ['-e', descendantScript(), pidFile],
+      cwd: root,
+      timeoutMs: 100,
+    });
+    const childPid = await waitForPidFile(pidFile);
+    const result = await execution;
+    assert.equal(result.timedOut, true);
+    await waitForProcessExit(childPid);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

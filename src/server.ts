@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import type { ComputerAdapter } from './adapter/computer-adapter.js';
-import { LocalComputerAdapter } from './adapter/local-computer-adapter.js';
+import { RoutingComputerAdapter } from './adapter/routing-computer-adapter.js';
 import type { ChatGptMcpConfig } from './config.js';
+import { ConcurrencyController } from './concurrency.js';
 import { registerTools } from './tools/register-tools.js';
 
 export const serverInfo = {
@@ -11,10 +12,11 @@ export const serverInfo = {
 
 export function createComputerMcpServer(
   config: Readonly<ChatGptMcpConfig>,
-  adapter: ComputerAdapter = new LocalComputerAdapter(config),
+  adapter: ComputerAdapter = new RoutingComputerAdapter(config),
+  concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency, config.execution.kubernetes.maxConcurrent),
 ): McpServer {
   const server = new McpServer(serverInfo);
-  registerTools(server, config, adapter);
+  registerTools(server, config, adapter, concurrency);
   return server;
 }
 
@@ -24,7 +26,8 @@ export function createComputerMcpServer(
  */
 export function createComputerMcpServerFactory(
   config: Readonly<ChatGptMcpConfig>,
-  adapter: ComputerAdapter = new LocalComputerAdapter(config),
+  adapter: ComputerAdapter = new RoutingComputerAdapter(config),
+  concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency, config.execution.kubernetes.maxConcurrent),
 ): () => McpServer {
-  return () => createComputerMcpServer(config, adapter);
+  return () => createComputerMcpServer(config, adapter, concurrency);
 }

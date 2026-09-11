@@ -2,11 +2,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
-import { authorizePath } from '../policy/filesystem.js';
-import { authorizeCommand, clampRuntime } from '../policy/shell.js';
+import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, buildFilesystemMountPolicy } from '../policy/filesystem.js';
+import { spawnBounded } from '../execution/bounded-process.js';
+import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
 import type {
   ApplicationLaunchResult,
   ComputerAdapter,
@@ -17,24 +19,39 @@ import type {
   PointerButton,
   ProcessInfo,
   ScreenCapture,
+  ScreenRecordingStartResult,
+  ScreenRecordingStopResult,
   ServiceAction,
   ServiceStatus,
   SystemInfo,
 } from './computer-adapter.js';
 
-const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SERVICE_NAME = /^[A-Za-z0-9_.@:-]+$/;
-const MAX_ENV_ENTRIES = 64;
-const MAX_ENV_VALUE_BYTES = 32 * 1024;
 const MAX_APPLICATION_ARGS = 256;
 const MAX_APPLICATION_ARG_BYTES = 64 * 1024;
 const MAX_URL_BYTES = 16 * 1024;
-const FORCE_KILL_DELAY_MS = 1_000;
-const INTERNAL_OUTPUT_LIMIT = 4 * 1024 * 1024;
-const HOST_DISPLAY_ENV_KEYS = new Set(['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'MIR_SOCKET', 'DBUS_SESSION_BUS_ADDRESS']);
+const MAX_RECORDING_STDERR_BYTES = 8 * 1024;
+
+interface ActiveScreenRecording {
+  child: ChildProcess;
+  path: string;
+  display: string;
+  startedAt: string;
+  startedAtMs: number;
+  stderrTail: string;
+}
 
 function requireCapability(enabled: boolean, operation: string, message: string): void {
   if (!enabled) throw adapterError('CAPABILITY_DISABLED', operation, message);
+}
+
+function requireNoFilesystemBlocklist(config: Readonly<ChatGptMcpConfig>, operation: string, capability: string): void {
+  if (config.filesystem.blocklist.length === 0) return;
+  throw adapterError(
+    'CAPABILITY_DISABLED',
+    operation,
+    `${capability} is disabled while a filesystem blocklist is active because it could execute filesystem mutations outside the enforced shell sandbox.`,
+  );
 }
 
 function fileType(stats: Awaited<ReturnType<typeof lstat>>): FileEntryType {
@@ -59,143 +76,17 @@ function mapOsError(error: unknown, operation: string, details?: Record<string, 
   });
 }
 
-function sanitizeHostDisplayEnvironment(env: NodeJS.ProcessEnv, hostDisplayAccess: boolean): NodeJS.ProcessEnv {
-  if (hostDisplayAccess) return env;
-  const sanitized = { ...env };
-  for (const key of HOST_DISPLAY_ENV_KEYS) delete sanitized[key];
-  return sanitized;
-}
-
-function validateEnvironment(
-  env: Readonly<Record<string, string>> | undefined,
-  allowEnvironment: boolean,
-  hostDisplayAccess: boolean,
-): NodeJS.ProcessEnv | undefined {
-  if (env === undefined) {
-    return hostDisplayAccess ? undefined : sanitizeHostDisplayEnvironment({ ...process.env }, false);
-  }
-  if (!allowEnvironment) {
-    throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Caller-provided environment variables are disabled.');
-  }
-  const entries = Object.entries(env);
-  if (entries.length > MAX_ENV_ENTRIES) {
-    throw adapterError('INVALID_INPUT', 'shell.exec', 'Too many caller-provided environment variables.', {
-      maximum: MAX_ENV_ENTRIES,
-    });
-  }
-  for (const [key, value] of entries) {
-    if (!ENV_KEY.test(key) || Buffer.byteLength(value, 'utf8') > MAX_ENV_VALUE_BYTES) {
-      throw adapterError('INVALID_INPUT', 'shell.exec', 'Invalid caller-provided environment variable.', { key });
-    }
-    if (!hostDisplayAccess && HOST_DISPLAY_ENV_KEYS.has(key)) {
-      throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Host display environment access is disabled.', { key });
-    }
-  }
-  return sanitizeHostDisplayEnvironment({ ...process.env, ...env }, hostDisplayAccess);
-}
-
-type CaptureOptions = {
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-  timeoutMs: number;
-  maxOutputBytes: number;
-  operation: string;
-};
-
-function spawnBounded(command: string, args: readonly string[], options: CaptureOptions): Promise<ExecResult> {
-  return new Promise((resolve, reject) => {
-    const started = process.hrtime.bigint();
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(command, [...args], {
-        cwd: options.cwd,
-        env: options.env ?? process.env,
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (error) {
-      mapOsError(error, options.operation, { command });
-    }
-
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let outputBytes = 0;
-    let timedOut = false;
-    let outputExceeded = false;
-    let spawnError: unknown;
-    let closed = false;
-
-    const terminate = (): void => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.kill('SIGTERM');
-      const forceTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      }, FORCE_KILL_DELAY_MS);
-      forceTimer.unref();
-    };
-
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      terminate();
-    }, options.timeoutMs);
-    timeout.unref();
-
-    const collect = (target: Buffer[], chunk: Buffer): void => {
-      if (outputExceeded) return;
-      outputBytes += chunk.length;
-      if (outputBytes > options.maxOutputBytes) {
-        outputExceeded = true;
-        terminate();
-        return;
-      }
-      target.push(Buffer.from(chunk));
-    };
-
-    child.stdout?.on('data', (chunk: Buffer) => collect(stdout, chunk));
-    child.stderr?.on('data', (chunk: Buffer) => collect(stderr, chunk));
-    child.on('error', error => {
-      spawnError = error;
-    });
-    child.on('close', exitCode => {
-      if (closed) return;
-      closed = true;
-      clearTimeout(timeout);
-      const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000;
-      if (outputExceeded) {
-        reject(adapterError('OUTPUT_LIMIT', options.operation, 'Command output exceeded the configured byte limit.', {
-          maximum: options.maxOutputBytes,
-        }));
-        return;
-      }
-      if (spawnError !== undefined) {
-        try {
-          mapOsError(spawnError, options.operation, { command });
-        } catch (error) {
-          reject(error);
-        }
-        return;
-      }
-      resolve({
-        exitCode,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-        durationMs,
-        timedOut,
-      });
-    });
-  });
-}
-
 async function requireSuccessfulCommand(
   command: string,
   args: readonly string[],
   operation: string,
   timeoutMs: number,
   env?: NodeJS.ProcessEnv,
+  maxOutputBytes = 1024 * 1024,
 ): Promise<ExecResult> {
   const result = await spawnBounded(command, args, {
     timeoutMs,
-    maxOutputBytes: INTERNAL_OUTPUT_LIMIT,
+    maxOutputBytes,
     operation,
     ...(env === undefined ? {} : { env }),
   });
@@ -220,8 +111,16 @@ function validateCoordinates(x: number, y: number, operation: string): void {
   }
 }
 
+function validateDisplay(display: string, operation: string): string {
+  if (display.length === 0 || display.length > 255 || /[\0\r\n]/.test(display)) {
+    throw adapterError('INVALID_INPUT', operation, 'display must be a non-empty X11 DISPLAY value.', { display });
+  }
+  return display;
+}
+
 export class LocalComputerAdapter implements ComputerAdapter {
   private readonly applications = new Map<string, ChildProcess>();
+  private readonly screenRecordings = new Map<string, ActiveScreenRecording>();
 
   constructor(private readonly config: Readonly<ChatGptMcpConfig>) {}
 
@@ -300,6 +199,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
     try {
       const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
       const flag = mode === 'create' ? 'wx' : mode === 'append' ? 'a' : 'w';
       await writeFile(path, content, { encoding: 'utf8', flag });
     } catch (error) {
@@ -312,6 +212,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
     try {
       const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
       await mkdir(path, { recursive });
     } catch (error) {
       mapOsError(error, operation, { path: requestedPath });
@@ -324,6 +225,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
     try {
       const source = await authorizePath(requestedSource, this.config.filesystem.roots, operation);
       const destination = await authorizePath(requestedDestination, this.config.filesystem.roots, operation);
+      await authorizePathEntryMutation(source, this.config.filesystem.blocklist, operation);
+      await authorizePathEntryMutation(destination, this.config.filesystem.blocklist, operation);
       await rename(source, destination);
     } catch (error) {
       mapOsError(error, operation, { source: requestedSource, destination: requestedDestination });
@@ -335,6 +238,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
     try {
       const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
       const metadata = await lstat(path);
       if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
         if (recursive) await rm(path, { recursive: true, force: false });
@@ -349,19 +253,31 @@ export class LocalComputerAdapter implements ComputerAdapter {
 
   async exec(request: ExecRequest): Promise<ExecResult> {
     const operation = 'shell.exec';
-    authorizeCommand(request.command, this.config.shell);
+    authorizeCommand(request.command, request.args, this.config.shell);
+    authorizeHostDisplaySafeInvocation(request.command, request.args, this.config.desktop.hostDisplayAccess);
     let cwd: string | undefined;
     if (request.cwd !== undefined) {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
-    const env = validateEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
-    return spawnBounded(request.command, request.args, {
+    const env = validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
+    const filesystemMountPolicy = await buildFilesystemMountPolicy(this.config.filesystem.blocklist, operation);
+    const options = {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
       timeoutMs: clampRuntime(request.timeoutMs, this.config.shell.maxRuntimeMs),
       maxOutputBytes: this.config.shell.maxOutputBytes,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
       operation,
-    });
+    };
+    const useSystemdIsolation = this.config.execution.localIsolation.enabled || filesystemMountPolicy.readOnlyPaths.length > 0;
+    const result = useSystemdIsolation
+      ? await spawnSystemdIsolated(request.command, request.args, options, this.config.execution.localIsolation, filesystemMountPolicy)
+      : await spawnBounded(request.command, request.args, options);
+    if (filesystemMountPolicy.messages.length > 0 && /(?:Read-only file system|\bEROFS\b)/i.test(result.stderr)) {
+      const notice = filesystemMountPolicy.messages.map(message => `Policy: ${message}`).join('\n');
+      return { ...result, stderr: `${result.stderr.replace(/\s+$/, '')}\n${notice}\n` };
+    }
+    return result;
   }
 
   async listProcesses(): Promise<readonly ProcessInfo[]> {
@@ -369,8 +285,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.process.list, operation, 'Process listing is disabled.');
     try {
       const result = await spawnBounded('ps', ['-eo', 'pid=,ppid=,user=,comm='], {
-        timeoutMs: 10_000,
-        maxOutputBytes: INTERNAL_OUTPUT_LIMIT,
+        timeoutMs: Math.min(10_000, this.config.execution.lightweightTimeoutMs),
+        maxOutputBytes: this.config.execution.lightweightOutputBytes,
         operation,
       });
       if (result.timedOut) throw adapterError('TIMEOUT', operation, 'Process listing timed out.');
@@ -423,6 +339,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
         ['show', name, '--property=ActiveState,SubState,Description', '--no-pager'],
         operation,
         this.config.service.maxRuntimeMs,
+        undefined,
+        this.config.execution.lightweightOutputBytes,
       );
       const fields = Object.fromEntries(result.stdout.split('\n').flatMap(line => {
         const index = line.indexOf('=');
@@ -448,6 +366,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
         [action, name, '--no-pager'],
         operation,
         this.config.service.maxRuntimeMs,
+        undefined,
+        this.config.execution.lightweightOutputBytes,
       );
     } catch (error) {
       mapOsError(error, operation, { name, action });
@@ -460,10 +380,12 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  async launchApplication(name: string, args: readonly string[] = []): Promise<ApplicationLaunchResult> {
+  async launchApplication(name: string, args: readonly string[], display: string): Promise<ApplicationLaunchResult> {
     const operation = 'app.launch';
     requireCapability(this.config.application.enabled, operation, 'Application launching is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    requireNoFilesystemBlocklist(this.config, operation, 'Application launching');
+    const desktopEnv = this.desktopEnvironment(display, operation);
     const definition = this.config.application.applications[name];
     if (definition === undefined) {
       throw adapterError('COMMAND_NOT_ALLOWED', operation, 'Application is not configured.', { name });
@@ -487,7 +409,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
         detached: true,
         shell: false,
         stdio: 'ignore',
-        env: sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess),
+        env: desktopEnv,
       });
       await new Promise<void>((resolve, reject) => {
         child.once('spawn', resolve);
@@ -525,10 +447,12 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  async openBrowser(rawUrl: string): Promise<void> {
+  async openBrowser(rawUrl: string, display: string): Promise<void> {
     const operation = 'browser.open';
     requireCapability(this.config.browser.enabled, operation, 'Browser opening is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    requireNoFilesystemBlocklist(this.config, operation, 'Browser launching');
+    const desktopEnv = this.desktopEnvironment(display, operation);
     if (Buffer.byteLength(rawUrl, 'utf8') > MAX_URL_BYTES) {
       throw adapterError('INVALID_INPUT', operation, 'URL exceeds the implementation byte limit.');
     }
@@ -548,17 +472,19 @@ export class LocalComputerAdapter implements ComputerAdapter {
         [url.toString()],
         operation,
         this.config.browser.maxRuntimeMs,
-        sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess),
+        desktopEnv,
+        this.config.execution.lightweightOutputBytes,
       );
     } catch (error) {
       mapOsError(error, operation, { scheme });
     }
   }
 
-  async captureScreen(): Promise<ScreenCapture> {
+  async captureScreen(display: string): Promise<ScreenCapture> {
     const operation = 'screen.capture';
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.screenCapture, operation, 'Screen capture is disabled.');
+    const desktopEnv = this.desktopEnvironment(display, operation);
     const dir = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-screen-'));
     const file = join(dir, 'screen.png');
     const candidates = this.config.desktop.screenBackend === 'auto'
@@ -584,6 +510,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
             timeoutMs: 30_000,
             maxOutputBytes: 1024 * 1024,
             operation,
+            env: desktopEnv,
           });
           if (!result.timedOut && result.exitCode === 0) {
             const image = await readFile(file);
@@ -607,36 +534,203 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  private async xdotool(args: readonly string[], operation: string): Promise<void> {
+
+  async startScreenRecording(display: string, requestedPath: string, frameRate = 30): Promise<ScreenRecordingStartResult> {
+    const operation = 'screen.record.start';
+    requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    requireCapability(this.config.desktop.screenRecording, operation, 'Screen recording is disabled.');
+    requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
+    if (!Number.isInteger(frameRate) || frameRate < 1 || frameRate > 60) {
+      throw adapterError('INVALID_INPUT', operation, 'frameRate must be an integer between 1 and 60.', { frameRate });
+    }
+    if (!requestedPath.toLowerCase().endsWith('.mp4')) {
+      throw adapterError('INVALID_INPUT', operation, 'Screen recordings must use an .mp4 output path.', { path: requestedPath });
+    }
+    if (this.screenRecordings.size >= this.config.desktop.maxRecordings) {
+      throw adapterError('OUTPUT_LIMIT', operation, 'Active screen recording limit reached.', {
+        maximum: this.config.desktop.maxRecordings,
+      });
+    }
+
+    const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+    await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
+    try {
+      const parent = await stat(dirname(path));
+      if (!parent.isDirectory()) {
+        throw adapterError('INVALID_INPUT', operation, 'Recording output parent is not a directory.', { path: dirname(path) });
+      }
+      try {
+        await stat(path);
+        throw adapterError('INVALID_INPUT', operation, 'Recording output path already exists.', { path });
+      } catch (error) {
+        if (isComputerAdapterError(error)) throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+
+      const child = spawn('ffmpeg', [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-nostats',
+        '-f', 'x11grab',
+        '-framerate', String(frameRate),
+        '-i', display,
+        '-t', String(this.config.desktop.maxRecordingSeconds),
+        '-fs', String(this.config.desktop.maxRecordingBytes),
+        '-an',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        path,
+      ], {
+        shell: false,
+        stdio: ['pipe', 'ignore', 'pipe'],
+        env: this.desktopEnvironment(display, operation),
+      });
+
+      let stderrTail = '';
+      child.stderr?.setEncoding('utf8');
+      child.stderr?.on('data', chunk => {
+        stderrTail = (stderrTail + String(chunk)).slice(-MAX_RECORDING_STDERR_BYTES);
+        const current = [...this.screenRecordings.values()].find(recording => recording.child === child);
+        if (current !== undefined) current.stderrTail = stderrTail;
+      });
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      if (child.pid === undefined) throw adapterError('OS_ERROR', operation, 'Recorder started without a process id.');
+
+      const handle = `rec_${randomUUID().replaceAll('-', '')}`;
+      const startedAtMs = Date.now();
+      const startedAt = new Date(startedAtMs).toISOString();
+      this.screenRecordings.set(handle, { child, path, display, startedAt, startedAtMs, stderrTail });
+      return { handle, pid: child.pid, path, display, startedAt };
+    } catch (error) {
+      return mapOsError(error, operation, { path: requestedPath, display });
+    }
+  }
+
+  async stopScreenRecording(handle: string): Promise<ScreenRecordingStopResult> {
+    const operation = 'screen.record.stop';
+    requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
+    requireCapability(this.config.desktop.screenRecording, operation, 'Screen recording is disabled.');
+    const recording = this.screenRecordings.get(handle);
+    if (recording === undefined) {
+      throw adapterError('NOT_FOUND', operation, 'Screen recording handle is unknown or already stopped.', { handle });
+    }
+
+    const { child, path, display, startedAtMs } = recording;
+    const waitForExit = (timeoutMs: number): Promise<boolean> => new Promise(resolve => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve(true);
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.off('exit', onExit);
+        resolve(value);
+      };
+      const onExit = () => finish(true);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      child.once('exit', onExit);
+    });
+
+    let requestedStop = false;
+    try {
+      if (child.exitCode === null && child.signalCode === null) {
+        requestedStop = true;
+        child.stdin?.write('q\n');
+        child.stdin?.end();
+        if (!await waitForExit(5_000)) {
+          child.kill('SIGINT');
+          if (!await waitForExit(5_000)) {
+            child.kill('SIGTERM');
+            if (!await waitForExit(3_000)) {
+              child.kill('SIGKILL');
+              await waitForExit(2_000);
+            }
+          }
+        }
+      }
+
+      const metadata = await stat(path);
+      if (!metadata.isFile() || metadata.size <= 0) {
+        throw adapterError('OS_ERROR', operation, 'Recorder did not produce a non-empty MP4 file.', {
+          handle,
+          path,
+          stderr: recording.stderrTail,
+        });
+      }
+      if (metadata.size > this.config.desktop.maxRecordingBytes) {
+        throw adapterError('OUTPUT_LIMIT', operation, 'Recording exceeded the configured byte limit.', {
+          handle,
+          path,
+          size: metadata.size,
+          maximum: this.config.desktop.maxRecordingBytes,
+        });
+      }
+      if (!requestedStop && child.exitCode !== null && child.exitCode !== 0 && child.signalCode === null) {
+        throw adapterError('OS_ERROR', operation, 'Recorder exited with an error.', {
+          handle,
+          path,
+          exitCode: child.exitCode,
+          stderr: recording.stderrTail,
+        });
+      }
+      return { handle, path, display, bytes: metadata.size, durationMs: Math.max(0, Date.now() - startedAtMs) };
+    } catch (error) {
+      return mapOsError(error, operation, { handle, path, display });
+    } finally {
+      this.screenRecordings.delete(handle);
+      child.stdin?.destroy();
+      child.stderr?.destroy();
+    }
+  }
+
+  private desktopEnvironment(display: string, operation: string): NodeJS.ProcessEnv {
+    const value = validateDisplay(display, operation);
+    const env = sanitizeHostDisplayEnvironment({ ...process.env }, this.config.desktop.hostDisplayAccess);
+    // DISPLAY is selected by each MCP invocation. Do not mutate process.env: concurrent
+    // calls may intentionally target different X servers. Prefer the explicit X11 target
+    // over an inherited Wayland/Mir target so application routing is deterministic.
+    delete env.WAYLAND_DISPLAY;
+    delete env.MIR_SOCKET;
+    env.DISPLAY = value;
+    return env;
+  }
+
+  private async xdotool(args: readonly string[], operation: string, display: string): Promise<void> {
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.input, operation, 'Desktop input is disabled.');
+    requireNoFilesystemBlocklist(this.config, operation, 'Desktop input');
     try {
-      await requireSuccessfulCommand('xdotool', args, operation, 30_000);
+      await requireSuccessfulCommand('xdotool', args, operation, Math.min(30_000, this.config.execution.lightweightTimeoutMs), this.desktopEnvironment(display, operation), this.config.execution.lightweightOutputBytes);
     } catch (error) {
       mapOsError(error, operation);
     }
   }
 
-  async movePointer(x: number, y: number): Promise<void> {
+  async movePointer(x: number, y: number, display: string): Promise<void> {
     const operation = 'input.move';
     validateCoordinates(x, y, operation);
-    await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation);
+    await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation, display);
   }
 
-  async clickPointer(button: PointerButton, x?: number, y?: number): Promise<void> {
+  async clickPointer(button: PointerButton, display: string, x?: number, y?: number): Promise<void> {
     const operation = 'input.click';
     if ((x === undefined) !== (y === undefined)) {
       throw adapterError('INVALID_INPUT', operation, 'x and y must be supplied together.');
     }
     if (x !== undefined && y !== undefined) {
       validateCoordinates(x, y, operation);
-      await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation);
+      await this.xdotool(['mousemove', '--sync', String(x), String(y)], operation, display);
     }
     const buttonNumber = button === 'left' ? '1' : button === 'middle' ? '2' : '3';
-    await this.xdotool(['click', buttonNumber], operation);
+    await this.xdotool(['click', buttonNumber], operation, display);
   }
 
-  async typeText(text: string, delayMs = 0): Promise<void> {
+  async typeText(text: string, display: string, delayMs = 0): Promise<void> {
     const operation = 'input.type';
     if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > 10_000) {
       throw adapterError('INVALID_INPUT', operation, 'delayMs must be an integer between 0 and 10000.');
@@ -648,14 +742,14 @@ export class LocalComputerAdapter implements ComputerAdapter {
         maximum: this.config.desktop.maxTextBytes,
       });
     }
-    await this.xdotool(['type', '--clearmodifiers', '--delay', String(delayMs), '--', text], operation);
+    await this.xdotool(['type', '--clearmodifiers', '--delay', String(delayMs), '--', text], operation, display);
   }
 
-  async pressKey(key: string): Promise<void> {
+  async pressKey(key: string, display: string): Promise<void> {
     const operation = 'input.key';
     if (key.length === 0 || key.length > 256 || key.includes('\0')) {
       throw adapterError('INVALID_INPUT', operation, 'Key sequence is invalid.');
     }
-    await this.xdotool(['key', '--clearmodifiers', key], operation);
+    await this.xdotool(['key', '--clearmodifiers', key], operation, display);
   }
 }

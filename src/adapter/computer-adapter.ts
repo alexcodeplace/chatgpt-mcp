@@ -22,7 +22,10 @@ export interface ExecRequest {
   cwd?: string;
   env?: Readonly<Record<string, string>>;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
+
+export type ShellExecutionClass = 'shell-local' | 'shell-remote';
 
 export interface ExecResult {
   exitCode: number | null;
@@ -60,6 +63,23 @@ export interface ScreenCapture {
   bytes: number;
 }
 
+
+export interface ScreenRecordingStartResult {
+  handle: string;
+  pid: number;
+  path: string;
+  display: string;
+  startedAt: string;
+}
+
+export interface ScreenRecordingStopResult {
+  handle: string;
+  path: string;
+  display: string;
+  bytes: number;
+  durationMs: number;
+}
+
 export type PointerButton = 'left' | 'middle' | 'right';
 
 export interface ComputerAdapter {
@@ -70,17 +90,21 @@ export interface ComputerAdapter {
   makeDirectory(path: string, recursive: boolean): Promise<void>;
   movePath(source: string, destination: string): Promise<void>;
   deletePath(path: string, recursive: boolean): Promise<void>;
+  classifyExec?(request: ExecRequest): ShellExecutionClass;
   exec(request: ExecRequest): Promise<ExecResult>;
+  executionMetrics?(): Record<string, unknown>;
   listProcesses(): Promise<readonly ProcessInfo[]>;
   killProcess(pid: number, signal?: NodeJS.Signals): Promise<void>;
   serviceStatus(name: string): Promise<ServiceStatus>;
   serviceControl(name: string, action: ServiceAction): Promise<void>;
-  launchApplication(name: string, args?: readonly string[]): Promise<ApplicationLaunchResult>;
+  launchApplication(name: string, args: readonly string[], display: string): Promise<ApplicationLaunchResult>;
   closeApplication(handle: string): Promise<void>;
-  openBrowser(url: string): Promise<void>;
-  captureScreen(): Promise<ScreenCapture>;
-  movePointer(x: number, y: number): Promise<void>;
-  clickPointer(button: PointerButton, x?: number, y?: number): Promise<void>;
-  typeText(text: string, delayMs?: number): Promise<void>;
-  pressKey(key: string): Promise<void>;
+  openBrowser(url: string, display: string): Promise<void>;
+  captureScreen(display: string): Promise<ScreenCapture>;
+  startScreenRecording(display: string, path: string, frameRate?: number): Promise<ScreenRecordingStartResult>;
+  stopScreenRecording(handle: string): Promise<ScreenRecordingStopResult>;
+  movePointer(x: number, y: number, display: string): Promise<void>;
+  clickPointer(button: PointerButton, display: string, x?: number, y?: number): Promise<void>;
+  typeText(text: string, display: string, delayMs?: number): Promise<void>;
+  pressKey(key: string, display: string): Promise<void>;
 }

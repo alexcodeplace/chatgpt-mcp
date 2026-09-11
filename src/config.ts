@@ -2,10 +2,17 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as z from 'zod/v4';
 
+const filesystemBlocklistEntrySchema = z.object({
+  path: z.string().min(1),
+  mode: z.literal('freeze-children').default('freeze-children'),
+  message: z.string().min(1).max(4096).optional(),
+});
+
 const filesystemSchema = z.object({
   read: z.boolean().default(false),
   write: z.boolean().default(false),
   roots: z.array(z.string().min(1)).default([]),
+  blocklist: z.array(filesystemBlocklistEntrySchema).max(256).default([]),
   maxReadBytes: z.number().int().positive().max(64 * 1024 * 1024).default(1024 * 1024),
   maxWriteBytes: z.number().int().positive().max(64 * 1024 * 1024).default(4 * 1024 * 1024),
 });
@@ -52,11 +59,143 @@ const browserSchema = z.object({
 const desktopSchema = z.object({
   hostDisplayAccess: z.boolean().default(false),
   screenCapture: z.boolean().default(false),
+  screenRecording: z.boolean().default(false),
   input: z.boolean().default(false),
   screenBackend: z.enum(['auto', 'grim', 'gnome-screenshot', 'scrot', 'imagemagick-import']).default('auto'),
   inputBackend: z.literal('xdotool').default('xdotool'),
   maxImageBytes: z.number().int().positive().max(64 * 1024 * 1024).default(10 * 1024 * 1024),
+  maxRecordingBytes: z.number().int().positive().max(16 * 1024 * 1024 * 1024).default(2 * 1024 * 1024 * 1024),
+  maxRecordingSeconds: z.number().int().positive().max(24 * 60 * 60).default(60 * 60),
+  maxRecordings: z.number().int().positive().max(64).default(8),
   maxTextBytes: z.number().int().positive().max(1024 * 1024).default(64 * 1024),
+});
+
+
+
+const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const kubernetesClientSchema = z.object({
+  command: z.string().min(1).default('kubectl'),
+  args: z.array(z.string()).default([]),
+  kubeconfig: z.string().min(1).optional(),
+  context: z.string().min(1).optional(),
+});
+
+const kubernetesPreparePathSchema = z.string().min(1).refine(value => {
+  if (value.startsWith('/') || value.startsWith('\\')) return false;
+  return !value.split(/[\\/]+/).some(part => part === '..');
+}, 'prepare predicate paths must stay inside the workspace');
+
+const kubernetesPrepareCommandSchema = z.object({
+  command: z.string().regex(/^[A-Za-z0-9_.+-]+$/),
+  args: z.array(z.string()).max(256).default([]),
+  whenFiles: z.array(kubernetesPreparePathSchema).max(32).default([]),
+  timeoutMs: z.number().int().positive().max(30 * 60 * 1000).default(300_000),
+});
+
+const kubernetesWorkspaceSchema = z.object({
+  mode: z.literal('snapshot').default('snapshot'),
+  containerPath: z.string().min(1).default('/workspace'),
+  exclude: z.array(z.string()).default([]),
+  prepareCommands: z.array(kubernetesPrepareCommandSchema).max(16).default([]),
+  maxArchiveBytes: z.number().int().positive().max(16 * 1024 * 1024 * 1024).default(2 * 1024 * 1024 * 1024),
+});
+
+const kubernetesResourcesSchema = z.object({
+  requests: z.record(z.string().min(1), z.string().min(1)).default({}),
+  limits: z.record(z.string().min(1), z.string().min(1)).default({}),
+});
+
+const kubernetesSchema = z.object({
+  enabled: z.boolean().default(false),
+  client: kubernetesClientSchema.default({ command: 'kubectl', args: [] }),
+  namespace: z.string().min(1).default('default'),
+  image: z.string().min(1).optional(),
+  imagePullPolicy: z.enum(['Always', 'IfNotPresent', 'Never']).default('IfNotPresent'),
+  idleCommand: z.array(z.string().min(1)).min(1).max(64).default(['sleep', 'infinity']),
+  imagePullSecrets: z.array(z.string().min(1)).default([]),
+  serviceAccount: z.string().min(1).optional(),
+  remoteCommands: z.array(z.string().min(1)).default([]),
+  localOnlyCommands: z.array(z.string().min(1)).default([]),
+  heavyCommandPatterns: z.array(z.string().min(1)).default([]),
+  maxConcurrent: z.number().int().positive().max(1024).default(24),
+  startupTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(60_000),
+  cleanupTimeoutMs: z.number().int().positive().max(5 * 60 * 1000).default(15_000),
+  workspace: kubernetesWorkspaceSchema.default({ mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }),
+  resources: kubernetesResourcesSchema.default({ requests: {}, limits: {} }),
+  nodeSelector: z.record(z.string().min(1), z.string()).default({}),
+  tolerations: z.array(z.record(z.string(), z.unknown())).default([]),
+  podLabels: z.record(z.string().min(1), z.string()).default({}),
+  podAnnotations: z.record(z.string().min(1), z.string()).default({}),
+  volumes: z.array(z.record(z.string(), z.unknown())).default([]),
+  volumeMounts: z.array(z.record(z.string(), z.unknown())).default([]),
+  ttlSeconds: z.number().int().positive().max(7 * 24 * 60 * 60).default(300),
+  requiredCommands: z.array(z.string().min(1)).default([]),
+  requiredEnvironment: z.record(z.string().regex(ENVIRONMENT_NAME), z.string()).default({}),
+  versionChecks: z.record(z.string().min(1), z.object({ args: z.array(z.string()).default(['--version']), pattern: z.string().min(1) })).default({}),
+}).superRefine((value, ctx) => {
+  if (value.enabled && value.image === undefined) {
+    ctx.addIssue({ code: 'custom', path: ['image'], message: 'image is required when Kubernetes execution is enabled' });
+  }
+  for (const [index, pattern] of value.heavyCommandPatterns.entries()) {
+    try { new RegExp(pattern); } catch {
+      ctx.addIssue({ code: 'custom', path: ['heavyCommandPatterns', index], message: 'pattern must be a valid regular expression' });
+    }
+  }
+  for (const [command, check] of Object.entries(value.versionChecks)) {
+    try { new RegExp(check.pattern); } catch {
+      ctx.addIssue({ code: 'custom', path: ['versionChecks', command, 'pattern'], message: 'version check pattern must be a valid regular expression' });
+    }
+  }
+  if (value.volumes.some(volume => volume['name'] === 'chatgpt-mcp-workspace')) {
+    ctx.addIssue({ code: 'custom', path: ['volumes'], message: 'volume name chatgpt-mcp-workspace is reserved for the isolated executor workspace' });
+  }
+  if (value.volumeMounts.some(mount => mount['mountPath'] === value.workspace.containerPath)) {
+    ctx.addIssue({ code: 'custom', path: ['volumeMounts'], message: 'the configured workspace path is reserved for the isolated executor workspace' });
+  }
+});
+
+const localIsolationSchema = z.object({
+  enabled: z.boolean().default(false),
+  scope: z.enum(['user', 'system']).default('user'),
+  command: z.string().min(1).default('systemd-run'),
+  managerCommand: z.string().min(1).default('systemctl'),
+  privilegeCommand: z.string().min(1).default('sudo'),
+  privilegeArgs: z.array(z.string()).max(16).default(['-n']),
+  tasksMax: z.number().int().min(16).max(65_536).default(512),
+  memoryMaxBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(4 * 1024 * 1024 * 1024),
+  cpuWeight: z.number().int().min(1).max(10_000).default(10),
+  stopTimeoutMs: z.number().int().positive().max(60_000).default(3_000),
+});
+
+const executionSchema = z.object({
+  defaultBackend: z.literal('local').default('local'),
+  lightweightTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
+  lightweightOutputBytes: z.number().int().positive().max(16 * 1024 * 1024).default(1024 * 1024),
+  localIsolation: localIsolationSchema.default({ enabled: false, scope: 'user', command: 'systemd-run', managerCommand: 'systemctl', privilegeCommand: 'sudo', privilegeArgs: ['-n'], tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }),
+  kubernetes: kubernetesSchema.default({
+    enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [],
+    remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24,
+    startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000,
+    workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 },
+    resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [],
+    ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {},
+  }),
+});
+
+const concurrencySchema = z.object({
+  maxConcurrent: z.number().int().min(2).max(1024).default(48),
+  reservedControlSlots: z.number().int().min(0).max(1023).default(8),
+  shellMaxConcurrent: z.number().int().positive().max(1024).default(8),
+  maxQueue: z.number().int().positive().max(4096).default(64),
+  queueTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
+}).superRefine((value, ctx) => {
+  if (value.reservedControlSlots >= value.maxConcurrent) {
+    ctx.addIssue({ code: 'custom', path: ['reservedControlSlots'], message: 'reservedControlSlots must be less than maxConcurrent' });
+  }
+  if (value.shellMaxConcurrent > value.maxConcurrent - value.reservedControlSlots) {
+    ctx.addIssue({ code: 'custom', path: ['shellMaxConcurrent'], message: 'shellMaxConcurrent must fit inside non-control concurrency capacity' });
+  }
 });
 
 const httpSchema = z.object({
@@ -68,8 +207,10 @@ const httpSchema = z.object({
 });
 
 const configSchema = z.object({
+  execution: executionSchema.default({ defaultBackend: 'local', lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, localIsolation: { enabled: false, scope: 'user', command: 'systemd-run', managerCommand: 'systemctl', privilegeCommand: 'sudo', privilegeArgs: ['-n'], tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
+  concurrency: concurrencySchema.default({ maxConcurrent: 48, reservedControlSlots: 8, shellMaxConcurrent: 8, maxQueue: 64, queueTimeoutMs: 30_000 }),
   http: httpSchema.default({ host: '127.0.0.1', port: 3210, allowedHosts: [], allowedOrigins: [] }),
-  filesystem: filesystemSchema.default({ read: false, write: false, roots: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
+  filesystem: filesystemSchema.default({ read: false, write: false, roots: [], blocklist: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
   shell: shellSchema.default({ enabled: false, allowedCommands: [], maxRuntimeMs: 120_000, maxOutputBytes: 4 * 1024 * 1024, allowEnvironment: false }),
   process: processSchema.default({ list: false, kill: false }),
   service: serviceSchema.default({ enabled: false, allowedServices: [], command: 'systemctl', maxRuntimeMs: 30_000 }),
@@ -78,10 +219,14 @@ const configSchema = z.object({
   desktop: desktopSchema.default({
     hostDisplayAccess: false,
     screenCapture: false,
+    screenRecording: false,
     input: false,
     screenBackend: 'auto',
     inputBackend: 'xdotool',
     maxImageBytes: 10 * 1024 * 1024,
+    maxRecordingBytes: 2 * 1024 * 1024 * 1024,
+    maxRecordingSeconds: 60 * 60,
+    maxRecordings: 8,
     maxTextBytes: 64 * 1024,
   }),
   logLevel: z.enum(['silent', 'error', 'warn', 'info', 'debug']).default('info'),
@@ -111,6 +256,7 @@ function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
     filesystem: {
       ...config.filesystem,
       roots: config.filesystem.roots.map(root => resolve(root)),
+      blocklist: config.filesystem.blocklist.map(rule => ({ ...rule, path: resolve(rule.path) })),
     },
     browser: {
       ...config.browser,

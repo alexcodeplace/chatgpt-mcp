@@ -2,7 +2,13 @@
 set -Eeuo pipefail
 
 PROFILE_NAME="${CHATGPT_MCP_PROFILE:-chatgpt-computer}"
-SERVICE_NAME="chatgpt-mcp-tunnel.service"
+TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel-${PROFILE_NAME}.service"
+LEGACY_TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel.service"
+MCP_SERVICE_NAME="chatgpt-mcp.service"
+WATCHDOG_SERVICE_NAME="chatgpt-mcp-watchdog-${PROFILE_NAME}.service"
+WATCHDOG_TIMER_NAME="chatgpt-mcp-watchdog-${PROFILE_NAME}.timer"
+HEALTH_PORT="${CHATGPT_MCP_HEALTH_PORT:-}"
+HEALTH_ADDR=""
 PNPM_VERSION="11.20.0"
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SECRETS_DIR="$REPO/.secrets"
@@ -39,7 +45,7 @@ The installer asks for both values if they are not already supplied through:
 
 Options:
   --yes         accept the broad-control configuration without prompting
-  --no-desktop  do not attempt to install xdotool/xdg-utils/screenshot helpers
+  --no-desktop  do not attempt to install xdotool/xdg-utils/screenshot/recording helpers
   -h, --help    show this help
 USAGE
 }
@@ -231,6 +237,7 @@ install_desktop_packages() {
   local need=()
   command -v xdotool >/dev/null 2>&1 || need+=(xdotool)
   command -v xdg-open >/dev/null 2>&1 || need+=(xdg-utils)
+  command -v ffmpeg >/dev/null 2>&1 || need+=(ffmpeg)
   if ! command -v grim >/dev/null 2>&1 && ! command -v gnome-screenshot >/dev/null 2>&1 \
     && ! command -v scrot >/dev/null 2>&1 && ! command -v import >/dev/null 2>&1; then
     need+=(scrot)
@@ -240,8 +247,50 @@ install_desktop_packages() {
   install_apt_packages "${need[@]}" || warn "Could not auto-install desktop helpers; core MCP/tunnel setup will continue."
 }
 
-write_launcher() {
+select_health_port() {
+  local existing=""
+  if [[ -z "$HEALTH_PORT" && -f "$PROFILE_FILE" ]]; then
+    existing="$(sed -nE 's/^[[:space:]]*listen_addr:[[:space:]]*"127\.0\.0\.1:([0-9]+)".*/\1/p' "$PROFILE_FILE" | head -n1)"
+    [[ "$existing" == 0 ]] || HEALTH_PORT="$existing"
+  fi
+
+  if [[ -z "$HEALTH_PORT" ]]; then
+    HEALTH_PORT="$(python3 - <<'PY'
+import socket
+for port in range(8080, 8100):
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        continue
+    sock.close()
+    print(port)
+    break
+else:
+    raise SystemExit("no free tunnel health port in 8080-8099")
+PY
+)"
+  fi
+
+  [[ "$HEALTH_PORT" =~ ^[0-9]+$ ]] || die "CHATGPT_MCP_HEALTH_PORT must be numeric."
+  (( HEALTH_PORT >= 1024 && HEALTH_PORT <= 65535 )) || die "CHATGPT_MCP_HEALTH_PORT must be between 1024 and 65535."
+  HEALTH_ADDR="127.0.0.1:$HEALTH_PORT"
+  info "Tunnel health endpoint: http://$HEALTH_ADDR"
+}
+
+write_launchers() {
   mkdir -p "$USER_LIB"
+  cat > "$USER_LIB/run-mcp-http.sh" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+: "${CHATGPT_MCP_REPO:?CHATGPT_MCP_REPO is required}"
+: "${CHATGPT_MCP_NODE_BIN:?CHATGPT_MCP_NODE_BIN is required}"
+export CHATGPT_MCP_CONFIG="$CHATGPT_MCP_REPO/config.local.json"
+if [[ -z "${XAUTHORITY:-}" && -f "$HOME/.Xauthority" ]]; then export XAUTHORITY="$HOME/.Xauthority"; fi
+exec "$CHATGPT_MCP_NODE_BIN" "$CHATGPT_MCP_REPO/dist/src/http.js"
+LAUNCHER
+
   cat > "$USER_LIB/run-tunnel.sh" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -251,22 +300,45 @@ set -Eeuo pipefail
 API_FILE="$CHATGPT_MCP_REPO/.secrets/runtime-api-key"
 [[ -r "$API_FILE" ]] || { echo "Missing runtime API key: $API_FILE" >&2; exit 1; }
 export CONTROL_PLANE_API_KEY="$(head -n1 "$API_FILE" | tr -d '\r\n')"
-export CHATGPT_MCP_CONFIG="$CHATGPT_MCP_REPO/config.local.json"
-export HEALTH_LISTEN_ADDR="127.0.0.1:0"
-if [[ -z "${DISPLAY:-}" && -S /tmp/.X11-unix/X0 ]]; then export DISPLAY=:0; fi
-if [[ -z "${XAUTHORITY:-}" && -f "$HOME/.Xauthority" ]]; then export XAUTHORITY="$HOME/.Xauthority"; fi
 exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
 LAUNCHER
-  chmod 700 "$USER_LIB/run-tunnel.sh"
+  chmod 700 "$USER_LIB/run-mcp-http.sh" "$USER_LIB/run-tunnel.sh"
 }
 
-write_service() {
+write_services() {
   mkdir -p "$SYSTEMD_DIR"
-  cat > "$SYSTEMD_DIR/$SERVICE_NAME" <<SERVICE
+  cat > "$SYSTEMD_DIR/$MCP_SERVICE_NAME" <<SERVICE
 [Unit]
-Description=OpenAI Secure MCP Tunnel for chatgpt-mcp
-Wants=network-online.target
-After=network-online.target
+Description=chatgpt-mcp local HTTP service
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO
+Environment=CHATGPT_MCP_REPO=$REPO
+Environment=CHATGPT_MCP_NODE_BIN=$(command -v node)
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET
+ExecStart=$USER_LIB/run-mcp-http.sh
+Restart=always
+RestartSec=1
+TimeoutStopSec=5
+TasksMax=512
+LimitNOFILE=65536
+MemoryHigh=6G
+MemoryMax=9G
+CPUWeight=80
+
+[Install]
+WantedBy=default.target
+SERVICE
+
+  cat > "$SYSTEMD_DIR/$TUNNEL_SERVICE_NAME" <<SERVICE
+[Unit]
+Description=OpenAI Secure MCP Tunnel for chatgpt-mcp ($PROFILE_NAME)
+Wants=network-online.target $MCP_SERVICE_NAME
+After=network-online.target $MCP_SERVICE_NAME
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -277,16 +349,97 @@ Environment=CHATGPT_MCP_PROFILE=$PROFILE_NAME
 Environment=TUNNEL_CLIENT_PROFILE_DIR=$PROFILE_DIR
 ExecStart=$USER_LIB/run-tunnel.sh
 Restart=always
-RestartSec=5
+RestartSec=1
 
 [Install]
 WantedBy=default.target
 SERVICE
+
+
+}
+
+write_watchdog() {
+  local watchdog_script="$USER_LIB/watchdog-$PROFILE_NAME.sh"
+  cat > "$watchdog_script" <<WATCHDOG
+#!/usr/bin/env bash
+set -Eeuo pipefail
+check_url() {
+  local url="\$1"
+  local i
+  for i in 1 2 3; do
+    if /usr/bin/curl -fsS --max-time 2 "\$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    /usr/bin/sleep 1
+  done
+  return 1
+}
+
+if ! check_url http://127.0.0.1:3210/healthz; then
+  /usr/bin/systemctl --user restart $MCP_SERVICE_NAME
+  /usr/bin/sleep 1
+  check_url http://127.0.0.1:3210/healthz || exit 1
+fi
+
+check_url http://$HEALTH_ADDR/readyz || /usr/bin/systemctl --user restart $TUNNEL_SERVICE_NAME
+WATCHDOG
+  chmod 700 "$watchdog_script"
+
+  cat > "$SYSTEMD_DIR/$WATCHDOG_SERVICE_NAME" <<SERVICE
+[Unit]
+Description=Health watchdog for chatgpt-mcp tunnel ($PROFILE_NAME)
+After=$MCP_SERVICE_NAME $TUNNEL_SERVICE_NAME
+
+[Service]
+Type=oneshot
+ExecStart=$watchdog_script
+SERVICE
+
+  cat > "$SYSTEMD_DIR/$WATCHDOG_TIMER_NAME" <<TIMER
+[Unit]
+Description=Run chatgpt-mcp tunnel watchdog ($PROFILE_NAME)
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=$WATCHDOG_SERVICE_NAME
+
+[Install]
+WantedBy=timers.target
+TIMER
+}
+
+legacy_service_is_this_profile() {
+  local unit="$SYSTEMD_DIR/$LEGACY_TUNNEL_SERVICE_NAME"
+  [[ -f "$unit" ]] || return 1
+  grep -Fqx "Environment=CHATGPT_MCP_PROFILE=$PROFILE_NAME" "$unit"
+}
+
+wait_for_http_backend() {
+  local attempt
+  for attempt in {1..20}; do
+    if curl -fsS http://127.0.0.1:3210/healthz >/dev/null 2>&1; then return 0; fi
+    sleep 0.25
+  done
+  journalctl --user -u "$MCP_SERVICE_NAME" -n 80 --no-pager >&2 || true
+  return 1
+}
+
+wait_for_tunnel_ready() {
+  local attempt
+  for attempt in {1..20}; do
+    if curl -fsS --max-time 2 "http://$HEALTH_ADDR/readyz" >/dev/null 2>&1; then return 0; fi
+    sleep 0.25
+  done
+  journalctl --user -u "$TUNNEL_SERVICE_NAME" -n 80 --no-pager >&2 || true
+  return 1
 }
 
 main() {
   [[ "$(uname -s)" == Linux ]] || die "This installer currently targets Linux."
-  [[ -f "$REPO/package.json" && -f "$REPO/src/stdio.ts" ]] || die "Run this script from a chatgpt-mcp checkout."
+  [[ -f "$REPO/package.json" && -f "$REPO/src/stdio.ts" && -f "$REPO/src/http.ts" ]] || die "Run this script from a chatgpt-mcp checkout."
+  [[ "$PROFILE_NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || die "CHATGPT_MCP_PROFILE may contain only letters, numbers, dot, underscore, and dash."
 
   say "chatgpt-mcp one-command installer"
   info "Repository: $REPO"
@@ -307,6 +460,8 @@ main() {
   (( node_major >= 22 )) || die "Node.js 22+ is required; found $(node --version)."
   select_pnpm
   install_tunnel_client
+  ensure_base_tools
+  select_health_port
   command -v systemctl >/dev/null 2>&1 || die "systemd/systemctl is required for the persistent user service."
   systemctl --user show-environment >/dev/null 2>&1 || die "A working systemd user session is required."
 
@@ -322,54 +477,54 @@ main() {
   chmod 600 "$LOCAL_CONFIG"
   install_desktop_packages
 
-  say "Checking the MCP stdio entrypoint"
-  [[ -f "$REPO/dist/src/stdio.js" ]] || die "Build did not produce dist/src/stdio.js"
-  local stdio_rc
-  set +e
-  CHATGPT_MCP_CONFIG="$LOCAL_CONFIG" timeout 1s node "$REPO/dist/src/stdio.js" >/dev/null 2>"$SECRETS_DIR/stdio-check.err"
-  stdio_rc=$?
-  set -e
-  if [[ $stdio_rc -ne 124 && $stdio_rc -ne 0 ]]; then
-    cat "$SECRETS_DIR/stdio-check.err" >&2 || true
-    die "Local MCP stdio process exited unexpectedly (status $stdio_rc)."
-  fi
-  rm -f "$SECRETS_DIR/stdio-check.err"
+  say "Checking the MCP HTTP entrypoint"
+  [[ -f "$REPO/dist/src/http.js" ]] || die "Build did not produce dist/src/http.js"
 
   say "Creating tunnel-client profile '$PROFILE_NAME'"
   mkdir -p "$PROFILE_DIR"; chmod 700 "$PROFILE_DIR"
   [[ ! -f "$PROFILE_FILE" ]] || mv "$PROFILE_FILE" "$PROFILE_FILE.backup.$(date +%Y%m%d-%H%M%S)"
-  export CHATGPT_MCP_CONFIG="$LOCAL_CONFIG"
   export TUNNEL_CLIENT_PROFILE_DIR="$PROFILE_DIR"
-  export HEALTH_LISTEN_ADDR="127.0.0.1:0"
   "$TUNNEL_CLIENT" init \
-    --sample sample_mcp_stdio_local \
+    --sample sample_mcp_remote_no_auth \
     --profile "$PROFILE_NAME" \
     --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
-    --mcp-command "$(command -v node) $REPO/dist/src/stdio.js"
+    --health-listen-addr "$HEALTH_ADDR" \
+    --mcp-server-url "http://127.0.0.1:3210/mcp"
 
-  say "Running tunnel diagnostics"
-  "$TUNNEL_CLIENT" doctor --profile "$PROFILE_NAME" --explain
-
-  say "Installing persistent systemd user service"
-  write_launcher
-  write_service
+  say "Installing persistent systemd user services"
+  write_launchers
+  write_services
+  write_watchdog
   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR XDG_SESSION_TYPE 2>/dev/null || true
   systemctl --user daemon-reload
-  systemctl --user enable --now "$SERVICE_NAME"
-  sleep 3
-  if ! systemctl --user is-active --quiet "$SERVICE_NAME"; then
-    journalctl --user -u "$SERVICE_NAME" -n 80 --no-pager >&2 || true
-    die "Tunnel service did not stay active."
+  systemctl --user enable "$MCP_SERVICE_NAME"
+  systemctl --user restart "$MCP_SERVICE_NAME"
+  wait_for_http_backend || die "Local MCP HTTP service did not become healthy."
+
+  say "Running tunnel diagnostics against the supervised HTTP backend"
+  "$TUNNEL_CLIENT" doctor --profile "$PROFILE_NAME" --explain || warn "Tunnel doctor reported a diagnostic failure; runtime readiness will be authoritative."
+
+  if legacy_service_is_this_profile; then
+    systemctl --user disable --now "$LEGACY_TUNNEL_SERVICE_NAME" 2>/dev/null || true
   fi
+  systemctl --user enable "$TUNNEL_SERVICE_NAME"
+  systemctl --user restart "$TUNNEL_SERVICE_NAME"
+  wait_for_tunnel_ready || die "Tunnel service did not become ready."
+  systemctl --user enable --now "$WATCHDOG_TIMER_NAME"
 
   say "Final verification"
-  "$TUNNEL_CLIENT" doctor --profile "$PROFILE_NAME" --explain
+  wait_for_http_backend || die "Local MCP HTTP service is not healthy."
+  wait_for_tunnel_ready || die "Tunnel readiness check failed."
+  "$TUNNEL_CLIENT" doctor --profile "$PROFILE_NAME" --explain || warn "Tunnel doctor reported a diagnostic failure even though live readiness passed."
 
   printf '\n============================================================\n'
   printf 'LOCAL SETUP COMPLETE\n'
   printf '============================================================\n'
   printf 'Profile:        %s\n' "$PROFILE_NAME"
-  printf 'Tunnel service: ACTIVE\n'
+  printf 'MCP HTTP service: ACTIVE\n'
+  printf 'Tunnel service:  %s ACTIVE\n' "$TUNNEL_SERVICE_NAME"
+  printf 'Health endpoint: http://%s/readyz\n' "$HEALTH_ADDR"
+  printf 'Watchdog timer:  %s ACTIVE\n' "$WATCHDOG_TIMER_NAME"
   printf '\nRemaining ChatGPT steps:\n'
   printf '  1. Enable ChatGPT Developer mode.\n'
   printf '  2. Open https://chatgpt.com/plugins\n'

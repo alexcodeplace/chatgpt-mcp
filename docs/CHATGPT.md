@@ -11,9 +11,9 @@ OpenAI-hosted MCP tunnel endpoint
         v
 tunnel-client on your computer
         |
-        | stdio
+        | loopback HTTP
         v
-chatgpt-mcp
+systemd-supervised chatgpt-mcp
 ```
 
 This guide follows the current OpenAI Secure MCP Tunnel and ChatGPT Developer Mode documentation:
@@ -32,7 +32,7 @@ cd chatgpt-mcp
 ./install.sh
 ```
 
-The installer asks for the credentials with the API key hidden, builds/tests the server, installs `tunnel-client` if needed, initializes and validates the tunnel profile, and creates a persistent systemd user service.
+The installer asks for credentials with the API key hidden, builds/tests the server, installs `tunnel-client` if needed, starts a supervised loopback HTTP MCP backend, initializes the tunnel profile against that backend, creates an independently supervised systemd tunnel service for the profile, and enables a health watchdog that can repair an unhealthy local MCP backend or tunnel.
 
 Check it later with:
 
@@ -158,9 +158,9 @@ tunnel-client run --profile chatgpt-computer
 
 Keep the client healthy while creating/testing the ChatGPT app. It only needs outbound HTTPS to OpenAI plus local access to the MCP process; no public inbound listener is required.
 
-## 5. Optional loopback HTTP path
+## 5. Recommended persistent loopback HTTP path
 
-For a persistent local MCP HTTP endpoint instead of stdio:
+The automated installer uses a persistent local MCP HTTP endpoint instead of coupling tunnel lifetime to a tunnel-owned stdio child. For manual setup:
 
 ```sh
 export CHATGPT_MCP_CONFIG="$PWD/config.local.json"
@@ -181,7 +181,7 @@ curl http://127.0.0.1:3210/healthz
 
 Initialize the tunnel profile with `--mcp-server-url http://127.0.0.1:3210/mcp` instead of `--mcp-command`.
 
-For one local computer, stdio is simpler because there is no second local HTTP boundary.
+For persistent use, the loopback HTTP boundary is intentionally preferred: systemd supervises the MCP process independently, so a tunnel reconnect or tunnel-client restart does not kill the MCP server, and multiple tunnel profiles can safely share the same backend. Stdio remains useful for direct/manual development.
 
 ## 6. Enable ChatGPT Developer Mode
 

@@ -325,6 +325,11 @@ Example configuration shape:
     "read": true,
     "write": true,
     "roots": ["/home/alex/projects", "/home/alex/Downloads"],
+    "blocklist": [{
+      "path": "/home/alex/projects",
+      "mode": "freeze-children",
+      "message": "Create worktrees under .worktrees/ in the current project."
+    }],
     "maxReadBytes": 1048576,
     "maxWriteBytes": 4194304
   },
@@ -343,7 +348,10 @@ Example configuration shape:
 
 `allowedCommands: ["*"]` may be supported as an explicit owner choice.
 
-Desktop-facing authority has a master `desktop.hostDisplayAccess` boolean. `screen.capture`, desktop input, configured application launch, and configured browser opening require this master grant in addition to their own family flags. When it is denied, shell children must not inherit host graphical-session environment such as `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, or `DBUS_SESSION_BUS_ADDRESS`, and caller-provided environment input must not be allowed to reintroduce those values.
+Desktop-facing authority has a master `desktop.hostDisplayAccess` boolean. Display-dependent tools MUST take an explicit caller-selected X11 `display` value per invocation; the server MUST NOT choose or mutate a process-global `DISPLAY` on their behalf. `app.launch`, `browser.open`, `screen.capture`, `screen.record.start`, and every `input.*` operation pass that display only to the child processes used by that invocation, permitting one MCP server to control multiple X11 displays concurrently without cross-call environment races. The selected display SHOULD be returned in structured tool metadata.
+Screen recording is handle-based: `screen.record.start` MUST return without waiting for the recording to finish so the caller can continue interacting with one or more displays, and `screen.record.stop` MUST gracefully finalize the recording before returning file metadata. Recording output MUST be constrained to configured writable filesystem roots and bounded by configured duration, byte-size, and concurrency limits.
+
+Desktop-facing authority has a master `desktop.hostDisplayAccess` boolean. `screen.capture`, desktop input, configured application launch, and configured browser opening require this master grant in addition to their own family flags. When it is denied, shell children must not inherit host graphical-session environment such as `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `MIR_SOCKET`, or `DBUS_SESSION_BUS_ADDRESS`, caller-provided environment input must not be allowed to reintroduce those values, and shell policy must reject a maintained defense-in-depth set of obvious host-capture executables and high-signal one-shot capture payloads. The denylist is explicitly not a substitute for OS isolation against arbitrary same-user code execution.
 
 No hard-coded interactive confirmation step is inserted after policy authorization. The permission boundary is the combination of ChatGPT/plugin permissions plus this server's configured capabilities.
 
@@ -358,9 +366,18 @@ Requirements:
 3. prevent `..` traversal from escaping a root;
 4. account for symlinks when accessing existing paths so a symlink cannot silently escape an allowed root;
 5. for creation paths, validate the nearest existing ancestor before creation;
-6. never duplicate root-check logic independently across tools.
+6. never duplicate root-check logic independently across tools;
+7. apply `filesystem.blocklist` rules after root authorization;
+8. `freeze-children` MUST prevent adding, removing, or renaming direct entries of the configured path while allowing ordinary access inside entries that already exist;
+9. direct MCP filesystem mutations that could create a path MUST check the nearest existing ancestor so recursive creation cannot skip the protected parent;
+10. local `shell.exec` MUST enforce `freeze-children` below executable parsing, using an OS filesystem boundary rather than a list of commands such as `mkdir`;
+11. shell enforcement MUST preserve write access inside existing non-symlink children and fail closed if the protected parent is missing; system-scope isolation SHOULD be preferred when available because it preserves host UID/GID ownership, while user-scope isolation MAY be used when it applies equivalent mount and escape hardening;
+12. both user- and system-scope shell enforcement MUST prevent privilege gain, mount reversal, nested systemd delegation, and `/proc` access to processes outside the command PID namespace; user-scope isolation MUST account for root-ownership remapping when invoking strict-owner clients such as OpenSSH;
+13. caller environment values passed to a privileged system-scope executor MUST NOT be placed in the privileged launcher argv;
+14. tool surfaces capable of delegating arbitrary GUI-side filesystem mutation (`app.launch`, `browser.open`, and `input.*`) MUST fail closed or be omitted while a blocklist is active unless they are subjected to equivalent filesystem enforcement;
+15. when a blocklist rule contains `message`, direct MCP policy errors MUST return it verbatim and shell denials SHOULD surface it alongside the OS denial.
 
-The filesystem policy implementation is a single reusable module used by every filesystem operation and by `cwd` validation for `shell.exec`.
+The filesystem policy implementation is a single reusable module used by every filesystem operation and by `cwd` validation for `shell.exec`. `freeze-children` is intentionally structural: it protects the parent directory-entry namespace, not merely the `mkdir` executable. Implementations must therefore cover equivalent creation/re-parenting paths such as language runtime APIs, Git worktree/clone operations, archive extraction, copy/sync tools, and rename/move.
 
 ## 10. Command execution rules
 
