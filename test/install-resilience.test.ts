@@ -24,6 +24,10 @@ test('installer keeps MCP lifetime independent from tunnel lifetime', async () =
   assert.match(install, /CPUWeight=80/);
   assert.match(install, /OnUnitActiveSec=15s/);
   assert.match(install, /watchdog-\$PROFILE_NAME\.sh/);
+  assert.match(install, /LAST_GOOD_CONFIG=/, 'watchdog must retain a last-known-good config');
+  assert.match(install, /config_valid/, 'watchdog must validate config before remembering or restoring it');
+  assert.match(install, /restore_last_good/, 'watchdog must recover from a persistently broken config');
+  assert.match(install, /watchdog-rejected/, 'watchdog must preserve the rejected config for diagnosis');
   assert.doesNotMatch(install, /--mcp-command .*dist\/src\/stdio\.js/);
 });
 

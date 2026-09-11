@@ -360,9 +360,17 @@ SERVICE
 
 write_watchdog() {
   local watchdog_script="$USER_LIB/watchdog-$PROFILE_NAME.sh"
+  local node_bin
+  node_bin="$(command -v node)"
   cat > "$watchdog_script" <<WATCHDOG
 #!/usr/bin/env bash
 set -Eeuo pipefail
+REPO="$REPO"
+CONFIG="\$REPO/config.local.json"
+NODE_BIN="$node_bin"
+STATE_DIR="\${XDG_STATE_HOME:-\$HOME/.local/state}/chatgpt-mcp/$PROFILE_NAME"
+LAST_GOOD_CONFIG="\$STATE_DIR/config.last-good.json"
+
 check_url() {
   local url="\$1"
   local i
@@ -375,10 +383,48 @@ check_url() {
   return 1
 }
 
-if ! check_url http://127.0.0.1:3210/healthz; then
+config_valid() {
+  [[ -r "\$1" ]] || return 1
+  (cd "\$REPO" && CHATGPT_MCP_CONFIG="\$1" "\$NODE_BIN" --input-type=module -e \
+    'import { loadConfig } from "./dist/src/config.js"; await loadConfig();') \
+    >/dev/null 2>&1
+}
+
+remember_last_good() {
+  config_valid "\$CONFIG" || return 0
+  /usr/bin/mkdir -p "\$STATE_DIR"
+  /usr/bin/chmod 700 "\$STATE_DIR"
+  if [[ ! -f "\$LAST_GOOD_CONFIG" ]] || ! /usr/bin/cmp -s "\$CONFIG" "\$LAST_GOOD_CONFIG"; then
+    /usr/bin/install -m 600 "\$CONFIG" "\$LAST_GOOD_CONFIG"
+  fi
+}
+
+restore_last_good() {
+  [[ -r "\$LAST_GOOD_CONFIG" ]] || return 1
+  config_valid "\$LAST_GOOD_CONFIG" || return 1
+  /usr/bin/cmp -s "\$CONFIG" "\$LAST_GOOD_CONFIG" && return 1
+  /usr/bin/cp -p "\$CONFIG" "\$CONFIG.watchdog-rejected" 2>/dev/null || true
+  /usr/bin/install -m 600 "\$LAST_GOOD_CONFIG" "\$CONFIG"
+  /usr/bin/systemd-cat -t chatgpt-mcp-watchdog echo 'restored last-known-good config after failed MCP restart' || true
+}
+
+if check_url http://127.0.0.1:3210/healthz; then
+  remember_last_good
+else
   /usr/bin/systemctl --user restart $MCP_SERVICE_NAME
   /usr/bin/sleep 1
-  check_url http://127.0.0.1:3210/healthz || exit 1
+  if ! check_url http://127.0.0.1:3210/healthz; then
+    if restore_last_good; then
+      /usr/bin/systemctl --user restart $MCP_SERVICE_NAME
+      /usr/bin/sleep 1
+      check_url http://127.0.0.1:3210/healthz || exit 1
+      remember_last_good
+    else
+      exit 1
+    fi
+  else
+    remember_last_good
+  fi
 fi
 
 check_url http://$HEALTH_ADDR/readyz || /usr/bin/systemctl --user restart $TUNNEL_SERVICE_NAME
