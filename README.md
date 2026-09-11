@@ -327,34 +327,16 @@ The installer also applies conservative systemd containment to the shared backen
 
 ## Filesystem blocklist
 
-`filesystem.blocklist` can freeze the direct entries of selected directories while leaving the contents of entries that already exist writable. This is intended for owner-controlled namespace boundaries such as a project root where agents may work inside existing repositories but must not create sibling repositories or ad-hoc worktrees.
+`filesystem.blocklist` can protect the direct entries of selected directories while leaving existing project contents writable. It is an accidental-destruction guard, not a shell sandbox.
 
-```json
-{
-  "filesystem": {
-    "blocklist": [
-      {
-        "path": "/home/YOU/Projects",
-        "mode": "freeze-children",
-        "message": "Creating folders at ~/Projects/ is not allowed. If you need to create a worktree, create it under .worktrees/ in the project folder you are working on."
-      }
-    ]
-  },
-  "execution": {
-    "localIsolation": {
-      "scope": "system",
-      "privilegeCommand": "sudo",
-      "privilegeArgs": ["-n"]
-    }
-  }
-}
-```
+With `mode: "freeze-children"`, native MCP filesystem mutations reject creation, deletion, rename, or move of a direct entry in the protected directory. `shell.exec` also checks direct `mkdir`, `rmdir`, and `rm` invocations for the same protected entries. Ordinary commands, GUI/browser/input tools, and work inside existing projects remain available.
 
-`freeze-children` is structural rather than executable-specific. Native MCP writes, mkdir, moves, deletes, and recording-output creation are checked directly. When shell execution is enabled, each `shell.exec` runs in a transient systemd mount namespace where the protected parent is read-only and each pre-existing non-symlink child is re-exposed read-write. `scope: "system"` is preferred when passwordless privileged launching is available because it preserves host UID/GID ownership. `scope: "user"` is also supported for unprivileged hosts; its namespace remaps host root ownership, so the system OpenSSH client config is masked and SSH/Git use the user's `~/.ssh` configuration instead. As a result, direct `mkdir`, shell wrappers, Python/Node filesystem APIs, `git clone`, `git worktree`, archive extraction, `cp`/`rsync`, and rename/re-parent tricks cannot create a new direct entry.
+Crucially, enabling this policy does **not** enable systemd isolation, sudo, `deck-sudo`, mount namespaces, or privilege escalation. `execution.localIsolation.enabled` is the only switch that selects the systemd-isolated executor. If it is `false`, `shell.exec` always uses normal user-level process execution.
 
-Restricted shell children in both user and system scope additionally run with `NoNewPrivileges=yes`, a private PID namespace, no `CAP_SYS_ADMIN`, mount syscalls filtered, and user/system systemd control sockets hidden. This closes privilege, nested-systemd, mount-namespace, and `/proc/<outside-pid>/root` escape paths. Caller environment values are staged through a root-only transient environment file so secrets are not exposed in the `sudo`/`systemd-run` argv. If the protected path is missing, write-capable policy checks fail closed.
+Routine `shell.exec` is also authentication-noninteractive: direct `sudo`, `su`, and `pkexec` are refused, SSH runs in batch mode, and credential/askpass UI is disabled. Explicit `deck-sudo` remains available when the deployment intentionally provides it. This prevents agents from surfacing root/password dialogs while preserving owner-authorized noninteractive privilege paths.
 
-The optional `message` is returned verbatim for direct MCP policy denials and appended to shell stderr when the kernel reports the read-only-filesystem denial. Existing direct entries and the protected root itself are protected from rename/removal as part of freezing the parent namespace; ordinary reads and writes inside existing project directories continue to work. Because GUI application launch, browser launch, and desktop input can delegate filesystem changes to processes outside `shell.exec`, those tool surfaces are omitted while a filesystem blocklist is active; read-only screen capture remains available.
+This guard deliberately does not claim to stop arbitrary language runtimes or custom wrappers from mutating the filesystem. Use normal OS permissions/snapshots for a hard security boundary.
+
 
 ## Trust boundary
 

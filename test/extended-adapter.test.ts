@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { LocalComputerAdapter } from '../src/adapter/local-computer-adapter.js';
+import { LocalComputerAdapter, serviceManagerArgs } from '../src/adapter/local-computer-adapter.js';
 import { parseConfig } from '../src/config.js';
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === 'object' && error !== null ? (error as { code?: string }).code : undefined;
 }
+
+test('user-scoped service management always addresses the user manager', () => {
+  assert.deepEqual(serviceManagerArgs('user', ['restart', 'example.service']), ['--user', 'restart', 'example.service']);
+  assert.deepEqual(serviceManagerArgs('system', ['restart', 'example.service']), ['restart', 'example.service']);
+});
 
 test('service allow-list rejects before invoking systemctl', async () => {
   const adapter = new LocalComputerAdapter(parseConfig({

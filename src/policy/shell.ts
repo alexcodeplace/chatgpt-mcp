@@ -102,6 +102,9 @@ const WRAPPER_EXECUTABLES = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh', 'env', 
 const SHELL_COMMAND_FLAGS = new Set(['-c', '--command']);
 const SHELL_SEGMENT_SPLIT = /(?:&&|\|\||[;&|`\n])/;
 const AGENT_LAUNCH_MESSAGE = 'launching agent sessions from this MCP is disabled by the owner';
+const INTERACTIVE_PRIVILEGE_EXECUTABLES = new Set(['sudo', 'su', 'pkexec']);
+const INTERACTIVE_PRIVILEGE_MESSAGE = 'interactive privilege escalation is disabled; use deck-sudo when explicitly supported or use a non-privileged path';
+const INTERACTIVE_PRIVILEGE_IN_WRAPPER = /(?:^|[\s;&|()`'"])(?:sudo|su|pkexec)(?=$|[\s;&|()`'"])/;
 
 function resolvePath(token: string): string | undefined {
   if (isAbsolute(token) || token.includes('/')) {
@@ -172,6 +175,30 @@ function commandLaunchesBlockedAgent(command: string, args: readonly string[]): 
   return false;
 }
 
+function commandUsesInteractivePrivilege(command: string, args: readonly string[]): boolean {
+  if (candidateNames(command).some(name => INTERACTIVE_PRIVILEGE_EXECUTABLES.has(name))) return true;
+  const executable = resolvedBasename(command);
+  if (WRAPPER_EXECUTABLES.has(executable) || executable === 'ssh') {
+    return args.some(arg => INTERACTIVE_PRIVILEGE_IN_WRAPPER.test(arg));
+  }
+  return false;
+}
+
+export function nonInteractiveShellArgs(command: string, args: readonly string[]): string[] {
+  if (resolvedBasename(command) !== 'ssh') return [...args];
+  return ['-o', 'BatchMode=yes', '-o', 'NumberOfPasswordPrompts=0', ...args];
+}
+
+export function nonInteractiveShellEnvironment(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  if (env === undefined) return undefined;
+  return {
+    ...env,
+    SSH_ASKPASS_REQUIRE: 'never',
+    GIT_TERMINAL_PROMPT: '0',
+    SUDO_ASKPASS: '/bin/false',
+  };
+}
+
 export function authorizeCommand(command: string, args: readonly string[], policy: ShellLimits): void {
   if (!policy.enabled) {
     throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Shell execution is disabled.');
@@ -184,6 +211,9 @@ export function authorizeCommand(command: string, args: readonly string[], polic
   }
   if (commandLaunchesBlockedAgent(command, args)) {
     throw adapterError('COMMAND_NOT_ALLOWED', 'shell.exec', AGENT_LAUNCH_MESSAGE, { command });
+  }
+  if (commandUsesInteractivePrivilege(command, args)) {
+    throw adapterError('COMMAND_NOT_ALLOWED', 'shell.exec', INTERACTIVE_PRIVILEGE_MESSAGE, { command });
   }
 }
 

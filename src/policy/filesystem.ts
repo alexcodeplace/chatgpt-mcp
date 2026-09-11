@@ -1,5 +1,5 @@
-import { lstat, realpath, readdir, stat } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { lstat, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { adapterError } from '../errors.js';
 
 export interface FilesystemBlockRule {
@@ -8,12 +8,6 @@ export interface FilesystemBlockRule {
   readonly message?: string | undefined;
 }
 
-export interface FilesystemMountPolicy {
-  readonly readOnlyPaths: readonly string[];
-  readonly readWritePaths: readonly string[];
-  readonly inaccessiblePaths: readonly string[];
-  readonly messages: readonly string[];
-}
 
 const DEFAULT_FREEZE_MESSAGE = 'Filesystem policy prevents changing entries directly inside this directory.';
 
@@ -129,75 +123,72 @@ export async function authorizePathEntryMutation(
   if (rule !== undefined) blocked(rule, operation, candidate);
 }
 
+
+const SHELL_CREATE_COMMANDS = new Set(['mkdir']);
+const SHELL_REMOVE_COMMANDS = new Set(['rmdir', 'rm']);
+
+function shellOperands(command: string, args: readonly string[]): { paths: string[]; parents: boolean } {
+  const paths: string[] = [];
+  let options = true;
+  let parents = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === undefined) continue;
+    if (options && arg === '--') {
+      options = false;
+      continue;
+    }
+    if (options && arg.startsWith('-') && arg !== '-') {
+      if (command === 'mkdir') {
+        if (arg === '-p' || arg === '--parents' || /^-[^-]*p/.test(arg)) parents = true;
+        if (arg === '-m' || arg === '--mode' || arg === '--context') index += 1;
+      } else if (command === 'rmdir') {
+        if (arg === '-p' || arg === '--parents' || /^-[^-]*p/.test(arg)) parents = true;
+      }
+      continue;
+    }
+    paths.push(arg);
+  }
+  return { paths, parents };
+}
+
 /**
- * Build a mount policy for arbitrary shell children. A frozen parent is mounted
- * read-only while each entry that already existed at invocation time is
- * re-exposed read-write. This freezes the parent's directory entries at the
- * kernel mount boundary, so mkdir(2), rename(2), Git, Python, Node, archive
- * extractors, rsync, and similar programs cannot create a bypass by using a
- * different executable.
- *
- * The user systemd manager sockets are hidden from restricted children so a
- * command cannot ask the manager to launch an unrestricted sibling unit and
- * escape the mount namespace.
+ * Guard the common direct shell commands that accidentally create/remove a
+ * protected top-level project entry. This is intentionally not a shell sandbox:
+ * it never changes the execution backend and does not try to parse arbitrary
+ * wrappers or language runtimes.
  */
-export async function buildFilesystemMountPolicy(
+export async function authorizeShellFilesystemMutation(
+  command: string,
+  args: readonly string[],
+  cwd: string | undefined,
   rules: readonly FilesystemBlockRule[],
   operation = 'shell.exec',
-): Promise<FilesystemMountPolicy> {
-  const readOnlyPaths = new Set<string>();
-  const readWritePaths = new Set<string>();
-  const inaccessiblePaths = new Set<string>();
-  const messages = new Set<string>();
-
-  for (const rule of rules) {
-    if (rule.mode !== 'freeze-children') continue;
-    const root = await canonicalRulePath(rule, operation);
-    readOnlyPaths.add(root);
-    if (rule.message !== undefined) messages.add(rule.message);
-
-    const entries = await readdir(root, { withFileTypes: true });
-    for (const entry of entries) {
-      // A symlink's target is not made read-only merely because the symlink's
-      // containing directory is mounted read-only. Rebinding it would instead
-      // resolve and potentially widen write access outside the protected tree.
-      if (entry.isSymbolicLink()) continue;
-      readWritePaths.add(join(root, entry.name));
+): Promise<void> {
+  if (rules.length === 0) return;
+  const executable = basename(command);
+  if (!SHELL_CREATE_COMMANDS.has(executable) && !SHELL_REMOVE_COMMANDS.has(executable)) return;
+  const { paths, parents } = shellOperands(executable, args);
+  const base = cwd ?? process.cwd();
+  for (const rawPath of paths) {
+    const target = resolve(base, rawPath);
+    if (SHELL_CREATE_COMMANDS.has(executable)) {
+      await authorizePathEntryCreation(target, rules, operation);
+      continue;
     }
-  }
-
-  if (readOnlyPaths.size > 0 && process.platform === 'linux') {
-    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-    const runtimeRoots = new Set<string>();
-    if (process.env.XDG_RUNTIME_DIR !== undefined) runtimeRoots.add(resolve(process.env.XDG_RUNTIME_DIR));
-    if (uid !== undefined) runtimeRoots.add(`/run/user/${uid}`);
-    for (const runtimeRoot of runtimeRoots) {
-      for (const socketPath of [join(runtimeRoot, 'systemd', 'private'), join(runtimeRoot, 'bus')]) {
-        try {
-          await lstat(socketPath);
-          inaccessiblePaths.add(socketPath);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
-      }
-    }
-    for (const socketPath of ['/run/systemd/private', '/run/dbus/system_bus_socket']) {
-      try {
-        await lstat(socketPath);
-        inaccessiblePaths.add(socketPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    await authorizePathEntryMutation(target, rules, operation);
+    if (executable === 'rmdir' && parents) {
+      let parent = dirname(target);
+      for (;;) {
+        await authorizePathEntryMutation(parent, rules, operation);
+        const next = dirname(parent);
+        if (next === parent) break;
+        parent = next;
       }
     }
   }
-
-  return {
-    readOnlyPaths: [...readOnlyPaths],
-    readWritePaths: [...readWritePaths],
-    inaccessiblePaths: [...inaccessiblePaths],
-    messages: [...messages],
-  };
 }
+
 
 export async function authorizePath(
   requestedPath: string,

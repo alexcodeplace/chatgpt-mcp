@@ -365,7 +365,7 @@ test('screen recording tools stay hidden without filesystem write authority', as
 });
 
 
-test('filesystem blocklist removes GUI execution and input surfaces while preserving read-only screen capture', async () => {
+test('filesystem blocklist does not disable unrelated GUI browser or input capabilities', async () => {
   const { client, server } = await harness({
     filesystem: { read: true, write: true, roots: ['/tmp'], blocklist: [{ path: '/tmp' }] },
     application: { enabled: true, applications: { terminal: { command: 'xterm', allowArguments: true } } },
@@ -374,16 +374,16 @@ test('filesystem blocklist removes GUI execution and input surfaces while preser
   });
   try {
     const names = (await client.listTools()).tools.map(tool => tool.name);
-    assert.equal(names.includes('app.launch'), false);
-    assert.equal(names.includes('app.close'), false);
-    assert.equal(names.includes('browser.open'), false);
-    assert.equal(names.some(name => name.startsWith('input.')), false);
+    assert.equal(names.includes('app.launch'), true);
+    assert.equal(names.includes('app.close'), true);
+    assert.equal(names.includes('browser.open'), true);
+    assert.equal(names.some(name => name.startsWith('input.')), true);
     assert.equal(names.includes('screen.capture'), true);
     const info = await client.callTool({ name: 'system.info', arguments: {} });
     const capabilities = (info.structuredContent as { capabilities?: Record<string, boolean> } | undefined)?.capabilities;
-    assert.equal(capabilities?.application, false);
-    assert.equal(capabilities?.browser, false);
-    assert.equal(capabilities?.input, false);
+    assert.equal(capabilities?.application, true);
+    assert.equal(capabilities?.browser, true);
+    assert.equal(capabilities?.input, true);
     assert.equal(capabilities?.screenCapture, true);
   } finally {
     await client.close();

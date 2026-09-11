@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampOutput, clampRuntime } from '../src/policy/shell.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampOutput, clampRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment } from '../src/policy/shell.js';
 
 const policy = {
   enabled: true,
@@ -115,4 +115,27 @@ test('agent launch via wrappers is blocked', () => {
 test('ordinary commands and blocked-word filenames still pass', () => {
   assert.doesNotThrow(() => authorizeCommand('git', ['status', '--short'], policy));
   assert.doesNotThrow(() => authorizeCommand('cat', ['notes-about-claudex.txt'], wildcardPolicy));
+});
+
+
+test('interactive privilege escalation commands are refused without blocking deck-sudo', () => {
+  for (const name of ['sudo', 'su', 'pkexec']) {
+    assert.throws(() => authorizeCommand(name, ['true'], wildcardPolicy), isCommandNotAllowed, name);
+  }
+  assert.doesNotThrow(() => authorizeCommand('deck-sudo', ['true'], wildcardPolicy));
+  assert.throws(() => authorizeCommand('bash', ['-lc', 'sudo systemctl restart example.service'], wildcardPolicy), isCommandNotAllowed);
+  assert.throws(() => authorizeCommand('ssh', ['debian3', 'sudo', 'true'], wildcardPolicy), isCommandNotAllowed);
+  assert.throws(() => authorizeCommand('ssh', ['debian3', "sh -lc 'sudo true'"], wildcardPolicy), isCommandNotAllowed);
+});
+
+test('ssh execution is forced to non-interactive authentication', () => {
+  assert.deepEqual(
+    nonInteractiveShellArgs('ssh', ['debian1', 'hostname']),
+    ['-o', 'BatchMode=yes', '-o', 'NumberOfPasswordPrompts=0', 'debian1', 'hostname'],
+  );
+  assert.deepEqual(nonInteractiveShellArgs('git', ['status']), ['status']);
+  const env = nonInteractiveShellEnvironment({ PATH: '/bin', SSH_ASKPASS_REQUIRE: 'force', GIT_TERMINAL_PROMPT: '1' });
+  assert.equal(env?.SSH_ASKPASS_REQUIRE, 'never');
+  assert.equal(env?.GIT_TERMINAL_PROMPT, '0');
+  assert.equal(env?.SUDO_ASKPASS, '/bin/false');
 });

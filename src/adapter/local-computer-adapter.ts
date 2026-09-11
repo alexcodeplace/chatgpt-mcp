@@ -5,10 +5,10 @@ import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
-import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, buildFilesystemMountPolicy } from '../policy/filesystem.js';
+import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
 import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
-import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
 import type {
   ApplicationLaunchResult,
   ComputerAdapter,
@@ -45,14 +45,6 @@ function requireCapability(enabled: boolean, operation: string, message: string)
   if (!enabled) throw adapterError('CAPABILITY_DISABLED', operation, message);
 }
 
-function requireNoFilesystemBlocklist(config: Readonly<ChatGptMcpConfig>, operation: string, capability: string): void {
-  if (config.filesystem.blocklist.length === 0) return;
-  throw adapterError(
-    'CAPABILITY_DISABLED',
-    operation,
-    `${capability} is disabled while a filesystem blocklist is active because it could execute filesystem mutations outside the enforced shell sandbox.`,
-  );
-}
 
 function fileType(stats: Awaited<ReturnType<typeof lstat>>): FileEntryType {
   if (stats.isFile()) return 'file';
@@ -103,6 +95,10 @@ async function requireSuccessfulCommand(
 
 function isAllowed(value: string, allowList: readonly string[]): boolean {
   return allowList.includes('*') || allowList.includes(value);
+}
+
+export function serviceManagerArgs(scope: 'user' | 'system', args: readonly string[]): string[] {
+  return scope === 'user' ? ['--user', ...args] : [...args];
 }
 
 function validateCoordinates(x: number, y: number, operation: string): void {
@@ -259,8 +255,11 @@ export class LocalComputerAdapter implements ComputerAdapter {
     if (request.cwd !== undefined) {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
-    const env = validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
-    const filesystemMountPolicy = await buildFilesystemMountPolicy(this.config.filesystem.blocklist, operation);
+    await authorizeShellFilesystemMutation(request.command, request.args, cwd, this.config.filesystem.blocklist, operation);
+    const env = nonInteractiveShellEnvironment(
+      validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess),
+    );
+    const args = nonInteractiveShellArgs(request.command, request.args);
     const options = {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
@@ -269,15 +268,10 @@ export class LocalComputerAdapter implements ComputerAdapter {
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       operation,
     };
-    const useSystemdIsolation = this.config.execution.localIsolation.enabled || filesystemMountPolicy.readOnlyPaths.length > 0;
-    const result = useSystemdIsolation
-      ? await spawnSystemdIsolated(request.command, request.args, options, this.config.execution.localIsolation, filesystemMountPolicy)
-      : await spawnBounded(request.command, request.args, options);
-    if (filesystemMountPolicy.messages.length > 0 && /(?:Read-only file system|\bEROFS\b)/i.test(result.stderr)) {
-      const notice = filesystemMountPolicy.messages.map(message => `Policy: ${message}`).join('\n');
-      return { ...result, stderr: `${result.stderr.replace(/\s+$/, '')}\n${notice}\n` };
+    if (this.config.execution.localIsolation.enabled) {
+      return spawnSystemdIsolated(request.command, args, options, this.config.execution.localIsolation);
     }
-    return result;
+    return spawnBounded(request.command, args, options);
   }
 
   async listProcesses(): Promise<readonly ProcessInfo[]> {
@@ -336,7 +330,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     try {
       const result = await requireSuccessfulCommand(
         this.config.service.command,
-        ['show', name, '--property=ActiveState,SubState,Description', '--no-pager'],
+        serviceManagerArgs(this.config.service.scope, ['show', name, '--property=ActiveState,SubState,Description', '--no-pager']),
         operation,
         this.config.service.maxRuntimeMs,
         undefined,
@@ -363,7 +357,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     try {
       await requireSuccessfulCommand(
         this.config.service.command,
-        [action, name, '--no-pager'],
+        serviceManagerArgs(this.config.service.scope, [action, name, '--no-pager']),
         operation,
         this.config.service.maxRuntimeMs,
         undefined,
@@ -384,7 +378,6 @@ export class LocalComputerAdapter implements ComputerAdapter {
     const operation = 'app.launch';
     requireCapability(this.config.application.enabled, operation, 'Application launching is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
-    requireNoFilesystemBlocklist(this.config, operation, 'Application launching');
     const desktopEnv = this.desktopEnvironment(display, operation);
     const definition = this.config.application.applications[name];
     if (definition === undefined) {
@@ -451,7 +444,6 @@ export class LocalComputerAdapter implements ComputerAdapter {
     const operation = 'browser.open';
     requireCapability(this.config.browser.enabled, operation, 'Browser opening is disabled.');
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
-    requireNoFilesystemBlocklist(this.config, operation, 'Browser launching');
     const desktopEnv = this.desktopEnvironment(display, operation);
     if (Buffer.byteLength(rawUrl, 'utf8') > MAX_URL_BYTES) {
       throw adapterError('INVALID_INPUT', operation, 'URL exceeds the implementation byte limit.');
@@ -703,7 +695,6 @@ export class LocalComputerAdapter implements ComputerAdapter {
   private async xdotool(args: readonly string[], operation: string, display: string): Promise<void> {
     requireCapability(this.config.desktop.hostDisplayAccess, operation, 'Host display access is disabled.');
     requireCapability(this.config.desktop.input, operation, 'Desktop input is disabled.');
-    requireNoFilesystemBlocklist(this.config, operation, 'Desktop input');
     try {
       await requireSuccessfulCommand('xdotool', args, operation, Math.min(30_000, this.config.execution.lightweightTimeoutMs), this.desktopEnvironment(display, operation), this.config.execution.lightweightOutputBytes);
     } catch (error) {

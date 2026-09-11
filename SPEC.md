@@ -370,14 +370,14 @@ Requirements:
 7. apply `filesystem.blocklist` rules after root authorization;
 8. `freeze-children` MUST prevent adding, removing, or renaming direct entries of the configured path while allowing ordinary access inside entries that already exist;
 9. direct MCP filesystem mutations that could create a path MUST check the nearest existing ancestor so recursive creation cannot skip the protected parent;
-10. local `shell.exec` MUST enforce `freeze-children` below executable parsing, using an OS filesystem boundary rather than a list of commands such as `mkdir`;
-11. shell enforcement MUST preserve write access inside existing non-symlink children and fail closed if the protected parent is missing; system-scope isolation SHOULD be preferred when available because it preserves host UID/GID ownership, while user-scope isolation MAY be used when it applies equivalent mount and escape hardening;
-12. both user- and system-scope shell enforcement MUST prevent privilege gain, mount reversal, nested systemd delegation, and `/proc` access to processes outside the command PID namespace; user-scope isolation MUST account for root-ownership remapping when invoking strict-owner clients such as OpenSSH;
-13. caller environment values passed to a privileged system-scope executor MUST NOT be placed in the privileged launcher argv;
-14. tool surfaces capable of delegating arbitrary GUI-side filesystem mutation (`app.launch`, `browser.open`, and `input.*`) MUST fail closed or be omitted while a blocklist is active unless they are subjected to equivalent filesystem enforcement;
-15. when a blocklist rule contains `message`, direct MCP policy errors MUST return it verbatim and shell denials SHOULD surface it alongside the OS denial.
+10. `freeze-children` MUST NOT implicitly enable local process isolation or change the shell execution backend;
+11. direct `mkdir`, `rmdir`, and `rm` shell invocations SHOULD apply the same protected-parent checks to reduce accidental project-root mutation without parsing arbitrary shell languages;
+12. GUI, browser, desktop-input, and unrelated shell capabilities MUST remain independently controlled by their own capability settings;
+13. `execution.localIsolation.enabled` MUST be the sole switch selecting systemd-isolated local execution;
+14. service-manager scope MUST be explicit so user services are controlled through the user manager without polkit elevation;
+15. when a blocklist rule contains `message`, direct MCP policy errors MUST return it verbatim.
 
-The filesystem policy implementation is a single reusable module used by every filesystem operation and by `cwd` validation for `shell.exec`. `freeze-children` is intentionally structural: it protects the parent directory-entry namespace, not merely the `mkdir` executable. Implementations must therefore cover equivalent creation/re-parenting paths such as language runtime APIs, Git worktree/clone operations, archive extraction, copy/sync tools, and rename/move.
+The filesystem policy implementation is a single reusable module used by every filesystem operation and by `cwd` validation for `shell.exec`. `freeze-children` protects native MCP filesystem mutations and common direct shell directory mutations. It is intentionally a guardrail rather than a kernel security boundary; arbitrary language runtimes and custom wrappers remain governed by the host OS permissions.
 
 ## 10. Command execution rules
 

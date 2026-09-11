@@ -134,6 +134,43 @@ test('filesystem blocklist freezes direct entries while allowing work inside exi
   }
 });
 
+test('filesystem blocklist does not force local isolation and guards direct mkdir/rmdir/rm only at the protected parent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-blocklist-shell-'));
+  const existing = join(root, 'existing-project');
+  await import('node:fs/promises').then(({ mkdir }) => mkdir(existing));
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { read: true, write: true, roots: [root], blocklist: [{ path: root, message: 'frozen' }] },
+    shell: { enabled: true, allowedCommands: ['node', 'mkdir', 'rmdir', 'rm'], maxRuntimeMs: 2_000, maxOutputBytes: 4096 },
+    execution: { localIsolation: { enabled: false, command: '/definitely-missing-systemd-run' } },
+  }));
+  try {
+    const ordinary = await adapter.exec({ command: 'node', args: ['-e', 'process.stdout.write("direct")'], cwd: existing });
+    assert.equal(ordinary.exitCode, 0);
+    assert.equal(ordinary.stdout, 'direct');
+
+    await assert.rejects(
+      () => adapter.exec({ command: 'mkdir', args: [join(root, 'new-project')], cwd: existing }),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    const nested = join(existing, 'nested');
+    const mkdirNested = await adapter.exec({ command: 'mkdir', args: [nested], cwd: existing });
+    assert.equal(mkdirNested.exitCode, 0);
+    const rmdirNested = await adapter.exec({ command: 'rmdir', args: [nested], cwd: existing });
+    assert.equal(rmdirNested.exitCode, 0);
+
+    await assert.rejects(
+      () => adapter.exec({ command: 'rmdir', args: [existing], cwd: root }),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => adapter.exec({ command: 'rm', args: ['-rf', existing], cwd: root }),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('filesystem read and write limits fail closed', async () => {
   const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-limits-'));
   const config = parseConfig({

@@ -26,6 +26,7 @@ test('safe defaults expose no action capability authority', () => {
   assert.equal(config.process.kill, false);
   assert.equal(config.service.enabled, false);
   assert.deepEqual(config.service.allowedServices, []);
+  assert.equal(config.service.scope, 'user');
   assert.equal(config.application.enabled, false);
   assert.deepEqual(config.application.applications, {});
   assert.equal(config.browser.enabled, false);
@@ -57,6 +58,11 @@ test('parsed configuration is deeply frozen', () => {
   assert.equal(Object.isFrozen(config.browser.allowedSchemes), true);
 });
 
+
+test('service manager defaults to user scope and supports explicit system scope', () => {
+  assert.equal(parseConfig({ service: { enabled: true, allowedServices: ['*'] } }).service.scope, 'user');
+  assert.equal(parseConfig({ service: { enabled: true, allowedServices: ['*'], scope: 'system' } }).service.scope, 'system');
+});
 
 test('filesystem blocklist normalizes paths and defaults to freeze-children mode', () => {
   const config = parseConfig({ filesystem: { blocklist: [{ path: './relative-policy', message: 'Use the project .worktrees directory.' }] } });

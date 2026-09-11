@@ -96,6 +96,7 @@
       "*"
     ],
     "command": "systemctl",
+    "scope": "user",
     "maxRuntimeMs": 30000
   },
   "application": {

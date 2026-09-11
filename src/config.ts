@@ -34,6 +34,7 @@ const serviceSchema = z.object({
   enabled: z.boolean().default(false),
   allowedServices: z.array(z.string().min(1)).default([]),
   command: z.string().min(1).default('systemctl'),
+  scope: z.enum(['user', 'system']).default('user'),
   maxRuntimeMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
 });
 
@@ -213,7 +214,7 @@ const configSchema = z.object({
   filesystem: filesystemSchema.default({ read: false, write: false, roots: [], blocklist: [], maxReadBytes: 1024 * 1024, maxWriteBytes: 4 * 1024 * 1024 }),
   shell: shellSchema.default({ enabled: false, allowedCommands: [], maxRuntimeMs: 120_000, maxOutputBytes: 4 * 1024 * 1024, allowEnvironment: false }),
   process: processSchema.default({ list: false, kill: false }),
-  service: serviceSchema.default({ enabled: false, allowedServices: [], command: 'systemctl', maxRuntimeMs: 30_000 }),
+  service: serviceSchema.default({ enabled: false, allowedServices: [], command: 'systemctl', scope: 'user', maxRuntimeMs: 30_000 }),
   application: applicationSchema.default({ enabled: false, applications: {}, maxTracked: 64 }),
   browser: browserSchema.default({ enabled: false, command: 'xdg-open', allowedSchemes: ['http', 'https'], maxRuntimeMs: 30_000 }),
   desktop: desktopSchema.default({

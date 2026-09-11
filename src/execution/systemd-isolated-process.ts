@@ -1,10 +1,8 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { ChatGptMcpConfig } from '../config.js';
 import type { ExecResult } from '../adapter/computer-adapter.js';
 import { adapterError } from '../errors.js';
-import type { FilesystemMountPolicy } from '../policy/filesystem.js';
 import { spawnBounded, type BoundedProcessOptions } from './bounded-process.js';
 
 type LocalIsolationConfig = Readonly<ChatGptMcpConfig['execution']['localIsolation']>;
@@ -14,9 +12,6 @@ const SYSTEM_ENV_DIR = '/run/chatgpt-mcp-shell-env';
 const ADMIN_TIMEOUT_MS = 10_000;
 const ADMIN_OUTPUT_BYTES = 64 * 1024;
 
-function filesystemPolicyActive(filesystem: FilesystemMountPolicy | undefined): boolean {
-  return filesystem !== undefined && filesystem.readOnlyPaths.length > 0;
-}
 
 function quoteEnvironmentFileValue(value: string): string {
   return `"${value
@@ -56,7 +51,6 @@ export function buildSystemdRunArgs(
   args: readonly string[],
   options: Pick<BoundedProcessOptions, 'cwd' | 'env'>,
   isolation: LocalIsolationConfig,
-  filesystem?: FilesystemMountPolicy,
   environmentFile?: string,
 ): string[] {
   const runArgs = [
@@ -83,32 +77,7 @@ export function buildSystemdRunArgs(
     if (environmentFile !== undefined) runArgs.push(`--property=EnvironmentFile=${environmentFile}`);
   }
 
-  if (filesystemPolicyActive(filesystem)) {
-    runArgs.push(
-      '--property=NoNewPrivileges=yes',
-      '--property=PrivatePIDs=yes',
-      '--property=CapabilityBoundingSet=~CAP_SYS_ADMIN',
-      '--property=SystemCallFilter=~@mount',
-      '--property=RestrictSUIDSGID=yes',
-    );
-    // Per-user systemd mount namespaces remap host root to nobody. OpenSSH
-    // rejects root-owned system config after that remap. Mask only the system
-    // client config so ordinary ssh/git continue to use the user's ~/.ssh
-    // configuration inside the restricted namespace. System-scope isolation
-    // preserves host ownership and does not need this compatibility mount.
-    if (isolation.scope === 'user' && process.platform === 'linux' && existsSync('/etc/ssh/ssh_config')) {
-      runArgs.push('--property=BindReadOnlyPaths=/dev/null:/etc/ssh/ssh_config');
-    }
-    for (const path of filesystem!.readOnlyPaths) {
-      runArgs.push(`--property=ReadOnlyPaths=${JSON.stringify(path)}`);
-    }
-    for (const path of filesystem!.readWritePaths) {
-      runArgs.push(`--property=ReadWritePaths=${JSON.stringify(path)}`);
-    }
-    for (const path of filesystem!.inaccessiblePaths) {
-      runArgs.push(`--property=InaccessiblePaths=${JSON.stringify(path)}`);
-    }
-  }
+
 
   if (options.cwd !== undefined) runArgs.push(`--working-directory=${options.cwd}`);
   if (isolation.scope === 'user' && options.env !== undefined) {
@@ -208,11 +177,10 @@ export async function spawnSystemdIsolated(
   args: readonly string[],
   options: BoundedProcessOptions,
   isolation: LocalIsolationConfig,
-  filesystem?: FilesystemMountPolicy,
 ): Promise<ExecResult> {
   const unit = `${UNIT_PREFIX}-${process.pid}-${randomUUID().replaceAll('-', '')}`;
   const environmentFile = await stageSystemEnvironment(unit, options.env, isolation);
-  const systemdArgs = buildSystemdRunArgs(unit, command, args, options, isolation, filesystem, environmentFile);
+  const systemdArgs = buildSystemdRunArgs(unit, command, args, options, isolation, environmentFile);
   const invocation = systemdCommandInvocation(isolation, systemdArgs);
   try {
     return await spawnBounded(invocation.command, invocation.args, {

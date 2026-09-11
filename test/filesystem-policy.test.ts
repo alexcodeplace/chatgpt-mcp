@@ -7,7 +7,7 @@ import {
   authorizePath,
   authorizePathEntryCreation,
   authorizePathEntryMutation,
-  buildFilesystemMountPolicy,
+  authorizeShellFilesystemMutation,
 } from '../src/policy/filesystem.js';
 
 async function fixture(): Promise<{ base: string; root: string; outside: string }> {
@@ -161,22 +161,27 @@ test('freeze-children also blocks mutation of the protected root itself', async 
   }
 });
 
-test('shell mount policy freezes the parent and re-exposes existing non-symlink children', async () => {
+test('direct shell mutation guard blocks protected mkdir/rmdir/rm without affecting nested work', async () => {
   const f = await fixture();
-  const existing = join(f.root, 'existing with spaces');
-  const alias = join(f.root, 'alias');
+  const existing = join(f.root, 'existing');
+  const rules = [{ path: f.root, mode: 'freeze-children' as const, message: 'blocked' }];
   try {
     await mkdir(existing);
-    await writeFile(join(f.root, 'existing.txt'), 'ok');
-    await symlink(f.outside, alias);
-    const policy = await buildFilesystemMountPolicy([
-      { path: f.root, mode: 'freeze-children', message: 'blocked' },
-    ]);
-    assert.deepEqual(policy.readOnlyPaths, [f.root]);
-    assert.ok(policy.readWritePaths.includes(existing));
-    assert.ok(policy.readWritePaths.includes(join(f.root, 'existing.txt')));
-    assert.equal(policy.readWritePaths.includes(alias), false);
-    assert.deepEqual(policy.messages, ['blocked']);
+    await assert.rejects(
+      () => authorizeShellFilesystemMutation('mkdir', [join(f.root, 'new-project')], existing, rules),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    await authorizeShellFilesystemMutation('mkdir', ['nested'], existing, rules);
+    await authorizeShellFilesystemMutation('rmdir', [join(existing, 'nested')], existing, rules);
+    await assert.rejects(
+      () => authorizeShellFilesystemMutation('rmdir', ['-p', join(existing, 'nested')], f.root, rules),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => authorizeShellFilesystemMutation('rm', ['-rf', existing], f.root, rules),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    await authorizeShellFilesystemMutation('node', ['-e', 'process.exit(0)'], existing, rules);
   } finally {
     await rm(f.base, { recursive: true, force: true });
   }
