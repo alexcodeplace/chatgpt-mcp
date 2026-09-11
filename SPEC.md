@@ -371,8 +371,8 @@ Requirements:
 8. `freeze-children` MUST prevent adding, removing, or renaming direct entries of the configured path while allowing ordinary access inside entries that already exist;
 9. direct MCP filesystem mutations that could create a path MUST check the nearest existing ancestor so recursive creation cannot skip the protected parent;
 10. local `shell.exec` MUST enforce `freeze-children` below executable parsing, using an OS filesystem boundary rather than a list of commands such as `mkdir`;
-11. shell enforcement MUST preserve write access inside existing non-symlink children, fail closed if the protected parent is missing, and use system-scope isolation when shell execution is enabled so host UID/GID ownership remains intact;
-12. system-scope shell enforcement MUST prevent privilege gain, mount reversal, nested systemd delegation, and `/proc` access to processes outside the command PID namespace;
+11. shell enforcement MUST preserve write access inside existing non-symlink children and fail closed if the protected parent is missing; system-scope isolation SHOULD be preferred when available because it preserves host UID/GID ownership, while user-scope isolation MAY be used when it applies equivalent mount and escape hardening;
+12. both user- and system-scope shell enforcement MUST prevent privilege gain, mount reversal, nested systemd delegation, and `/proc` access to processes outside the command PID namespace; user-scope isolation MUST account for root-ownership remapping when invoking strict-owner clients such as OpenSSH;
 13. caller environment values passed to a privileged system-scope executor MUST NOT be placed in the privileged launcher argv;
 14. tool surfaces capable of delegating arbitrary GUI-side filesystem mutation (`app.launch`, `browser.open`, and `input.*`) MUST fail closed or be omitted while a blocklist is active unless they are subjected to equivalent filesystem enforcement;
 15. when a blocklist rule contains `message`, direct MCP policy errors MUST return it verbatim and shell denials SHOULD surface it alongside the OS denial.

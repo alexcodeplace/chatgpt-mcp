@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import test from 'node:test';
 import { parseConfig } from '../src/config.js';
 import { buildSystemdRunArgs, serializeSystemdEnvironmentFile } from '../src/execution/systemd-isolated-process.js';
@@ -22,6 +23,35 @@ test('user-scope systemd isolation builds bounded argument-array execution witho
   assert.ok(args.includes('--setenv=SECRET_TOKEN'));
   assert.equal(args.some(value => value.includes('do-not-leak')), false);
   assert.deepEqual(args.slice(-4), ['--', 'git', 'status', '--short']);
+});
+
+test('user-scope isolation applies filesystem blocklist mounts and escape hardening', () => {
+  const isolation = parseConfig({ execution: { localIsolation: { enabled: true, scope: 'user' } } }).execution.localIsolation;
+  const args = buildSystemdRunArgs(
+    'chatgpt-mcp-exec-user-policy-test',
+    'mkdir',
+    ['/tmp/projects/new'],
+    { cwd: '/tmp', env: { PATH: '/bin' } },
+    isolation,
+    {
+      readOnlyPaths: ['/tmp/projects'],
+      readWritePaths: ['/tmp/projects/existing'],
+      inaccessiblePaths: ['/run/user/1000/systemd/private', '/run/user/1000/bus'],
+      messages: ['blocked'],
+    },
+  );
+  assert.ok(args.includes('--user'));
+  assert.ok(args.includes('--property=NoNewPrivileges=yes'));
+  assert.ok(args.includes('--property=PrivatePIDs=yes'));
+  assert.ok(args.includes('--property=CapabilityBoundingSet=~CAP_SYS_ADMIN'));
+  assert.ok(args.includes('--property=SystemCallFilter=~@mount'));
+  assert.ok(args.includes('--property=RestrictSUIDSGID=yes'));
+  assert.ok(args.includes('--property=ReadOnlyPaths=\"/tmp/projects\"'));
+  assert.ok(args.includes('--property=ReadWritePaths=\"/tmp/projects/existing\"'));
+  assert.ok(args.includes('--property=InaccessiblePaths=\"/run/user/1000/systemd/private\"'));
+  if (process.platform === 'linux' && existsSync('/etc/ssh/ssh_config')) {
+    assert.ok(args.includes('--property=BindReadOnlyPaths=/dev/null:/etc/ssh/ssh_config'));
+  }
 });
 
 test('system-scope isolation applies filesystem blocklist mounts and escape hardening', () => {

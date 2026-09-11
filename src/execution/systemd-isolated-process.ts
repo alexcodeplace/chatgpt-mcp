@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { ChatGptMcpConfig } from '../config.js';
 import type { ExecResult } from '../adapter/computer-adapter.js';
@@ -83,14 +84,20 @@ export function buildSystemdRunArgs(
   }
 
   if (filesystemPolicyActive(filesystem)) {
-    runArgs.push('--property=NoNewPrivileges=yes');
-    if (isolation.scope === 'system') {
-      runArgs.push(
-        '--property=PrivatePIDs=yes',
-        '--property=CapabilityBoundingSet=~CAP_SYS_ADMIN',
-        '--property=SystemCallFilter=~@mount',
-        '--property=RestrictSUIDSGID=yes',
-      );
+    runArgs.push(
+      '--property=NoNewPrivileges=yes',
+      '--property=PrivatePIDs=yes',
+      '--property=CapabilityBoundingSet=~CAP_SYS_ADMIN',
+      '--property=SystemCallFilter=~@mount',
+      '--property=RestrictSUIDSGID=yes',
+    );
+    // Per-user systemd mount namespaces remap host root to nobody. OpenSSH
+    // rejects root-owned system config after that remap. Mask only the system
+    // client config so ordinary ssh/git continue to use the user's ~/.ssh
+    // configuration inside the restricted namespace. System-scope isolation
+    // preserves host ownership and does not need this compatibility mount.
+    if (isolation.scope === 'user' && process.platform === 'linux' && existsSync('/etc/ssh/ssh_config')) {
+      runArgs.push('--property=BindReadOnlyPaths=/dev/null:/etc/ssh/ssh_config');
     }
     for (const path of filesystem!.readOnlyPaths) {
       runArgs.push(`--property=ReadOnlyPaths=${JSON.stringify(path)}`);
@@ -204,13 +211,6 @@ export async function spawnSystemdIsolated(
   filesystem?: FilesystemMountPolicy,
 ): Promise<ExecResult> {
   const unit = `${UNIT_PREFIX}-${process.pid}-${randomUUID().replaceAll('-', '')}`;
-  if (filesystemPolicyActive(filesystem) && isolation.scope !== 'system') {
-    throw adapterError(
-      'CAPABILITY_DISABLED',
-      options.operation,
-      'Filesystem blocklist shell enforcement requires system-scope local isolation.',
-    );
-  }
   const environmentFile = await stageSystemEnvironment(unit, options.env, isolation);
   const systemdArgs = buildSystemdRunArgs(unit, command, args, options, isolation, filesystem, environmentFile);
   const invocation = systemdCommandInvocation(isolation, systemdArgs);

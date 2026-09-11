@@ -103,14 +103,11 @@ test('malformed configuration fails closed', () => {
 
 
 
-test('filesystem blocklist with shell execution requires system-scope local isolation', () => {
-  assert.throws(
-    () => parseConfig({
-      filesystem: { blocklist: [{ path: '/tmp' }] },
-      shell: { enabled: true, allowedCommands: ['*'] },
-    }),
-    /requires system-scope isolation/,
-  );
+test('filesystem blocklist with shell execution supports user- and system-scope local isolation', () => {
+  assert.doesNotThrow(() => parseConfig({
+    filesystem: { blocklist: [{ path: '/tmp' }] },
+    shell: { enabled: true, allowedCommands: ['*'] },
+  }));
   assert.doesNotThrow(() => parseConfig({
     filesystem: { blocklist: [{ path: '/tmp' }] },
     shell: { enabled: true, allowedCommands: ['*'] },

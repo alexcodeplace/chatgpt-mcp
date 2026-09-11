@@ -230,14 +230,6 @@ const configSchema = z.object({
     maxTextBytes: 64 * 1024,
   }),
   logLevel: z.enum(['silent', 'error', 'warn', 'info', 'debug']).default('info'),
-}).superRefine((value, ctx) => {
-  if (value.shell.enabled && value.filesystem.blocklist.length > 0 && value.execution.localIsolation.scope !== 'system') {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['execution', 'localIsolation', 'scope'],
-      message: 'filesystem blocklist with shell execution requires system-scope isolation',
-    });
-  }
 });
 
 export type ChatGptMcpConfig = z.infer<typeof configSchema>;
