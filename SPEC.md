@@ -634,3 +634,13 @@ A credential whose value happens to equal a field name must not rename that fiel
 Unquoted identifier references in command/source text are not literal credentials;
 credential-file assignments and explicit sensitive fields remain value sources.
 Protocol-collision regressions and a real installed provider check are required.
+
+## Planned named-key operation adapter
+
+The owner-directed [named-key consumer contract](docs/specs/NAMED-KEY-OPERATIONS.md)
+records a proposed optional integration with Overdeck's deck-kmgr broker.
+Overdeck owns the canonical product specification, decision UI, key management
+and Botmaster owner-reply workflow. MCP exposes only authorized names, typed
+operation requests and job status, never values or decision/management authority.
+This is a design reference, not an implemented capability or a change to legacy
+shell/filesystem permissions and output redaction.
