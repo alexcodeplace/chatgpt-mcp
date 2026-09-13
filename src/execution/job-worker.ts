@@ -1,3 +1,4 @@
+import { OutputRedactor } from '../security/output-redaction.js';
 import { mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -44,7 +45,10 @@ export async function runJob(directory: string, execute?: (request: ExecRequest)
     if (abort.signal.aborted) throw adapterError('CANCELLED', 'shell.exec', 'Job cancelled before execution.');
     const computer = new RoutingComputerAdapter(config);
     const adapter = execute ?? computer.exec.bind(computer);
-    result = await adapter({ ...data.request, signal: abort.signal });
+    const redactor = await OutputRedactor.create(config, data.request);
+    const raw = await adapter({ ...data.request, signal: abort.signal });
+    await redactor.refresh();
+    result = redactor.value(raw);
   } catch (error) {
     // Do not persist arbitrary exception messages, which may contain arguments or secrets.
     errorCode = isComputerAdapterError(error) ? error.code : 'OS_ERROR';
@@ -62,6 +66,7 @@ export async function runJob(directory: string, execute?: (request: ExecRequest)
   await atomicJobJson(path, {
     ...record, state: abort.signal.aborted ? 'cancelled' : (result?.exitCode === 0 && !result.timedOut ? 'succeeded' : 'failed'),
     updatedAt: new Date().toISOString(), exitCode: result?.exitCode ?? null, timedOut: result?.timedOut ?? false,
+    outputRedacted: true,
     resultBytes: Buffer.byteLength(stdout) + Buffer.byteLength(stderr), ...(errorCode === undefined ? {} : { errorCode }),
   });
   await rm(join(directory, 'request.json'), { force: true });

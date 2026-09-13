@@ -1,3 +1,4 @@
+import { redactedTools } from './redacted-tools.js';
 import { diagnosticId, errorCategory, runtimeIdentity, trace } from '../diagnostics.js';
 import { registerJobTools } from './register-job-tools.js';
 import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
@@ -96,7 +97,8 @@ export function registerTools(
   adapter: ComputerAdapter,
   concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency),
 ): void {
-  server.registerTool(
+  const tools = redactedTools(server, config);
+  tools.registerTool(
     'system.info',
     {
       title: 'System Info',
@@ -116,7 +118,7 @@ export function registerTools(
     },
     async (_args, ctx) => run('system.info', concurrency, ctx.mcpReq.signal, async () => ({
       ...(await adapter.systemInfo()),
-      runtime: runtimeIdentity(config),
+      runtime: { ...runtimeIdentity(config), outputRedaction: { enabled: true, mode: 'output-only', placeholder: '[SECRET_REDACTED]' } },
       capabilities: {
         filesystemRead: config.filesystem.read,
         filesystemWrite: config.filesystem.write,
@@ -136,7 +138,7 @@ export function registerTools(
   );
 
   if (config.filesystem.read && config.filesystem.roots.length > 0) {
-    server.registerTool(
+    tools.registerTool(
       'fs.list',
       {
         title: 'List Directory',
@@ -148,11 +150,11 @@ export function registerTools(
       async ({ path }, ctx) => run('fs.list', concurrency, ctx.mcpReq.signal, async () => ({ path, entries: [...await adapter.listDirectory(path)] })),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'fs.read',
       {
         title: 'Read File',
-        description: 'Use this to read one UTF-8 text file inside the granted filesystem roots.',
+        description: 'Read a UTF-8 file inside granted roots. Credential-file contents are returned as [SECRET_REDACTED], not denied. Use credential paths inside an authorized command instead of reading their values into chat.',
         inputSchema: z.object({ path: pathInput, maxBytes: z.number().int().positive().optional() }),
         outputSchema: z.object({ path: z.string(), content: z.string(), bytes: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -165,7 +167,7 @@ export function registerTools(
   }
 
   if (config.filesystem.write && config.filesystem.roots.length > 0) {
-    server.registerTool(
+    tools.registerTool(
       'fs.write',
       {
         title: 'Write File',
@@ -184,7 +186,7 @@ export function registerTools(
       }),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'fs.mkdir',
       {
         title: 'Create Directory',
@@ -199,7 +201,7 @@ export function registerTools(
       }),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'fs.move',
       {
         title: 'Move Path',
@@ -214,7 +216,7 @@ export function registerTools(
       }),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'fs.delete',
       {
         title: 'Delete Path',
@@ -231,7 +233,7 @@ export function registerTools(
   }
 
   if (config.filesystem.read && config.filesystem.write && config.filesystem.roots.length > 0 && adapter.replaceFile !== undefined) {
-    server.registerTool('fs.replace', {
+    tools.registerTool('fs.replace', {
       title: 'Atomic Conditional File Replacement',
       description: 'Preferred for editing a regular file. Requires its current SHA-256 (or null for a new file). Stages and syncs content before atomic replacement. A changed hash returns CONFLICT without overwriting. Rejects symlinks and frozen directory entries. Serializes cooperating MCP replacements; not a kernel compare-and-swap against external writers.',
       inputSchema: z.object({ path: pathInput, content: z.string(), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }),
@@ -240,14 +242,14 @@ export function registerTools(
     }, async ({ path, content, expectedSha256 }, ctx) => run('fs.replace', concurrency, ctx.mcpReq.signal, async () => ({ path, ...await adapter.replaceFile!(path, content, expectedSha256) })));
   }
 
-  registerJobTools(server, config, concurrency);
+  registerJobTools(tools, config, concurrency);
 
   if (config.shell.enabled) {
-    server.registerTool(
+    tools.registerTool(
       'shell.exec',
       {
         title: 'Execute Command',
-        description: 'Execute a short locally allowed command without an implicit shell. Prefer exec.start/status/output for long work when available. A lost response does not prove the command failed; inspect its effects before retrying. OVERLOADED means capacity pressure, not missing permissions.',
+        description: 'Execute a short locally allowed command without an implicit shell. Commands may use authorized local credential files or environment variables internally; do not paste credential values into tool arguments or chat. Secret text in results is replaced with [SECRET_REDACTED] without blocking credential use. Prefer exec.start/status/output for long work when available. A lost response does not prove the command failed; inspect its effects before retrying. OVERLOADED means capacity pressure, not missing permissions.',
         inputSchema: z.object({
           command: z.string().min(1),
           args: z.array(z.string()).default([]),
@@ -276,7 +278,7 @@ export function registerTools(
   }
 
   if (config.process.list) {
-    server.registerTool(
+    tools.registerTool(
       'process.list',
       {
         title: 'List Processes',
@@ -290,7 +292,7 @@ export function registerTools(
   }
 
   if (config.process.kill) {
-    server.registerTool(
+    tools.registerTool(
       'process.kill',
       {
         title: 'Kill Process',
@@ -307,7 +309,7 @@ export function registerTools(
   }
 
   if (config.service.enabled) {
-    server.registerTool(
+    tools.registerTool(
       'service.status',
       {
         title: 'Service Status',
@@ -319,7 +321,7 @@ export function registerTools(
       async ({ name }, ctx) => run('service.status', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.serviceStatus(name) })),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'service.control',
       {
         title: 'Control Service',
@@ -336,7 +338,7 @@ export function registerTools(
   }
 
   if (config.application.enabled && config.desktop.hostDisplayAccess) {
-    server.registerTool(
+    tools.registerTool(
       'app.launch',
       {
         title: 'Launch Application',
@@ -348,7 +350,7 @@ export function registerTools(
       async ({ name, args, display }, ctx) => run('app.launch', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.launchApplication(name, args, display), display })),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'app.close',
       {
         title: 'Close Application',
@@ -365,7 +367,7 @@ export function registerTools(
   }
 
   if (config.browser.enabled && config.desktop.hostDisplayAccess) {
-    server.registerTool(
+    tools.registerTool(
       'browser.open',
       {
         title: 'Open Browser URL',
@@ -382,7 +384,7 @@ export function registerTools(
   }
 
   if (config.desktop.hostDisplayAccess && config.desktop.screenCapture) {
-    server.registerTool(
+    tools.registerTool(
       'screen.capture',
       {
         title: 'Capture Screen',
@@ -410,7 +412,7 @@ export function registerTools(
 
 
   if (config.desktop.hostDisplayAccess && config.desktop.screenRecording && config.filesystem.write && config.filesystem.roots.length > 0) {
-    server.registerTool(
+    tools.registerTool(
       'screen.record.start',
       {
         title: 'Start Screen Recording',
@@ -430,7 +432,7 @@ export function registerTools(
       })),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'screen.record.stop',
       {
         title: 'Stop Screen Recording',
@@ -448,7 +450,7 @@ export function registerTools(
   }
 
   if (config.desktop.hostDisplayAccess && config.desktop.input) {
-    server.registerTool(
+    tools.registerTool(
       'input.move',
       {
         title: 'Move Pointer',
@@ -463,7 +465,7 @@ export function registerTools(
       }),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'input.click',
       {
         title: 'Click Pointer',
@@ -483,7 +485,7 @@ export function registerTools(
       }),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'input.type',
       {
         title: 'Type Text',
@@ -498,7 +500,7 @@ export function registerTools(
       }),
     );
 
-    server.registerTool(
+    tools.registerTool(
       'input.key',
       {
         title: 'Press Key',
