@@ -1,3 +1,4 @@
+import { replaceUtf8 } from '../execution/atomic-file.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
@@ -202,6 +203,21 @@ export class LocalComputerAdapter implements ComputerAdapter {
     } catch (error) {
       mapOsError(error, operation, { path: requestedPath, mode });
     }
+  }
+
+  async replaceFile(requestedPath: string, content: string, expectedSha256: string | null): Promise<{ sha256: string }> {
+    const operation = 'fs.replace';
+    requireCapability(this.config.filesystem.write && this.config.filesystem.read, operation, 'Atomic replacement requires filesystem read and write grants.');
+    if (Buffer.byteLength(content, 'utf8') > this.config.filesystem.maxWriteBytes) throw adapterError('OUTPUT_LIMIT', operation, 'Replacement exceeds the write byte limit.');
+    try {
+      const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
+      return await replaceUtf8(path, content, expectedSha256, this.config.filesystem.maxReadBytes, async temporary => {
+        await authorizePath(temporary, this.config.filesystem.roots, operation);
+        await authorizePathEntryCreation(temporary, this.config.filesystem.blocklist, operation);
+      });
+    } catch (error) { return mapOsError(error, operation, { path: requestedPath }); }
   }
 
   async makeDirectory(requestedPath: string, recursive: boolean): Promise<void> {

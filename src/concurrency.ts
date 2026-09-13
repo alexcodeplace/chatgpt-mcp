@@ -5,6 +5,10 @@ export type AdmissionClass = 'control' | 'normal' | 'shell-local' | 'shell-local
 
 const CONTROL_OPERATIONS = new Set([
   'system.info',
+  'exec.status',
+  'exec.output',
+  'exec.cancel',
+  'exec.list',
   'process.list',
   'process.kill',
   'service.status',

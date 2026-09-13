@@ -577,3 +577,16 @@ The following changes are architectural and must update this specification befor
 - changing the public tool namespace/schema incompatibly;
 - moving OS-specific logic into MCP handlers instead of the adapter seam;
 - adding an internal interactive approval workflow as a mandatory execution step.
+
+
+## 21. Reliability revision (2026-09-13)
+
+The public protocol remains stateless. Optional durable jobs extend the explicit-handle contract, not the MCP session model. `jobs.enabled` plus a shell grant exposes `exec.start`, `exec.status`, `exec.output`, `exec.cancel`, and `exec.list`. One process-wide job store owns admission for the configured directory. Its executor workers call the existing computer adapter/policy layer and use private persistent reservations and one-time worker claims. No transport error automatically replays a mutation. Worker death or ambiguous launch acknowledgement yields an unknown outcome requiring reconciliation.
+
+Systemd-backed jobs survive backend restarts. The detached launcher does not promise identical service-manager semantics. Output and ledgers have separate bounded retention and capacity; unknown outcomes are not automatically evicted or replayed. Only one active backend submits new work to a job directory. The detailed contract and retention defaults are in `docs/RELIABILITY.md`.
+
+A read+write grant on an adapter implementing `replaceFile` exposes `fs.replace(path, content, expectedSha256)`. It stages and syncs content before atomic replacement, rejects symlinks and frozen directory mutations, and rejects stale hashes. It is not a kernel CAS against non-cooperating writers. Legacy `fs.write` retains its earlier semantics.
+
+`system.info.runtime` includes release identity, loaded configuration fingerprint, process identity and durable-execution availability. New error codes are `CONFLICT` and `OUTCOME_UNKNOWN`; `OVERLOADED` remains capacity pressure, not a permission or tunnel diagnosis. Diagnostics must not contain request arguments, environment values, output or credentials.
+
+Recovery is a separate local supervisor with one locked backend owner and independent per-profile states. It checks fresh MCP capabilities and control-plane polling, never restores permissions/configuration automatically, persists restart budgets before actions, and performs no unconditional restart loop. Deployments share that lock, verify an immutable release inventory, exercise a private candidate, arm an independent rollback timer, and preserve the previous backend's running resources. `docs/DESKTOP-UPDATE.md` defines the local-agent rollout procedure and platform limitations.

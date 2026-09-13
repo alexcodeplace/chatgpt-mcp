@@ -9,6 +9,8 @@ export const errorCodes = [
   'OVERLOADED',
   'CANCELLED',
   'OS_ERROR',
+  'CONFLICT',
+  'OUTCOME_UNKNOWN',
 ] as const;
 
 export type ComputerAdapterErrorCode = (typeof errorCodes)[number];

@@ -2,50 +2,44 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-async function text(path: string): Promise<string> {
-  return readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-}
+async function text(path: string): Promise<string> { return readFile(new URL(`../${path}`, import.meta.url), 'utf8'); }
 
-test('installer keeps MCP lifetime independent from tunnel lifetime', async () => {
+test('installer preserves configuration and pins a checksum-verified tunnel release', async () => {
   const install = await text('install.sh');
-
   assert.match(install, /MCP_SERVICE_NAME="chatgpt-mcp\.service"/);
-  assert.doesNotMatch(install, /export DISPLAY=/, 'installer must not choose a process-global DISPLAY for the MCP server');
-  assert.match(install, /UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET/, 'MCP service must strip inherited display routing');
+  assert.match(install, /UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET/);
   assert.match(install, /TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel-\$\{PROFILE_NAME\}\.service"/);
-  assert.match(install, /--sample sample_mcp_remote_no_auth/);
-  assert.match(install, /--mcp-server-url "http:\/\/127\.0\.0\.1:3210\/mcp"/);
-  assert.match(install, /Restart=always\nRestartSec=1/);
-  assert.match(install, /TimeoutStopSec=5/);
-  assert.match(install, /TasksMax=512/);
-  assert.match(install, /LimitNOFILE=65536/);
-  assert.match(install, /MemoryHigh=6G/);
-  assert.match(install, /MemoryMax=9G/);
-  assert.match(install, /CPUWeight=80/);
-  assert.match(install, /OnUnitActiveSec=15s/);
-  assert.match(install, /watchdog-\$PROFILE_NAME\.sh/);
-  assert.match(install, /LAST_GOOD_CONFIG=/, 'watchdog must retain a last-known-good config');
-  assert.match(install, /config_valid/, 'watchdog must validate config before remembering or restoring it');
-  assert.match(install, /restore_last_good/, 'watchdog must recover from a persistently broken config');
-  assert.match(install, /watchdog-rejected/, 'watchdog must preserve the rejected config for diagnosis');
-  assert.doesNotMatch(install, /--mcp-command .*dist\/src\/stdio\.js/);
+  assert.match(install, /install-tunnel\.py/);
+  assert.match(install, /install --frozen-lockfile/);
+  assert.doesNotMatch(install, /--no-frozen-lockfile/);
+  assert.match(install, /if \[\[ ! -f "\$LOCAL_CONFIG" \]\]; then cp/);
+  assert.match(install, /StartLimitBurst=3/);
+  assert.match(install, /Restart=on-failure\nRestartSec=10/);
+  assert.match(install, /RestartPreventExitStatus=78/);
+  assert.match(install, /TUNNEL_VERSION_MISMATCH/);
+  assert.match(install, /install-recovery\.py/);
+  assert.doesNotMatch(install, /restore_last_good|config\.last-good|OnUnitActiveSec=15s/);
+  const pin = await text('scripts/install-tunnel.py');
+  assert.match(pin, /VERSION = "0\.0\.14"/);
+  assert.match(pin, /hashlib\.sha256\(archive\)/);
+  assert.doesNotMatch(pin, /releases\/latest/);
 });
 
-test('status checks both supervised layers', async () => {
-  const status = await text('scripts/tunnel-status.sh');
-
-  assert.match(status, /MCP HTTP service:/);
-  assert.match(status, /http:\/\/127\.0\.0\.1:3210\/healthz/);
-  assert.match(status, /chatgpt-mcp-tunnel-\$\{PROFILE_NAME\}\.service/);
-  assert.match(status, /Tunnel readiness:/);
-  assert.match(status, /chatgpt-mcp-watchdog-\$\{PROFILE_NAME\}\.timer/);
+test('recovery installation has one bounded owner and retains polling evidence', async () => {
+  const installer = await text('scripts/install-recovery.py');
+  assert.match(installer, /chatgpt-mcp-recovery\.service/);
+  assert.match(installer, /OnUnitInactiveSec=30s/);
+  const recovery = await text('scripts/recovery.py');
+  assert.match(recovery, /fcntl\.flock/);
+  assert.match(recovery, /commands_poll_last_successful_timestamp_seconds/);
+  assert.match(recovery, /maxRestartsPerHour/);
+  assert.match(recovery, /circuit_open/);
+  assert.doesNotMatch(recovery, /restore_last_good|chmod.*configPath/);
 });
 
-test('profile uninstall does not tear down shared backend', async () => {
+test('profile uninstall does not tear down the shared backend', async () => {
   const uninstall = await text('scripts/tunnel-uninstall.sh');
-
   assert.match(uninstall, /shared chatgpt-mcp HTTP service/);
   assert.doesNotMatch(uninstall, /disable --now "\$MCP_SERVICE_NAME"/);
-  assert.match(uninstall, /WATCHDOG_TIMER_NAME/);
   assert.doesNotMatch(uninstall, /rm -rf "\$USER_LIB"/);
 });

@@ -1,3 +1,4 @@
+import { diagnosticId, trace, withDiagnosticRequest } from './diagnostics.js';
 import { timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from 'node:http';
@@ -139,7 +140,17 @@ export function createComputerHttpServer(
     // Node's IncomingMessage types model `method` as optional, while the MCP
     // node bridge models it as required. A real server request has a method;
     // the guard above makes this cast the explicit type seam between the two.
-    void nodeHandler(req as Parameters<typeof nodeHandler>[0], res);
+    withDiagnosticRequest(() => {
+      const requestId = diagnosticId();
+      let delivered = false;
+      res.once('finish', () => { delivered = true; trace('http_response_finished', { requestId, status: res.statusCode }); });
+      res.once('close', () => { if (!delivered) trace('http_response_interrupted', { requestId }); });
+      void Promise.resolve().then(() => nodeHandler(req as Parameters<typeof nodeHandler>[0], res)).catch(() => {
+        trace('http_handler_failed', { requestId });
+        if (!res.headersSent && !res.destroyed) writeJson(res, 500, { error: 'backend_handler_failure', diagnosticId: requestId });
+        else if (!res.destroyed) res.end();
+      });
+    });
   });
 
   return { server, closeHandler: handler.close };

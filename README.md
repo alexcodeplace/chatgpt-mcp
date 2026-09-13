@@ -18,6 +18,12 @@ ChatGPT chooses which tool to call. `chatgpt-mcp` validates the call against the
 
 Architecture: [`SPEC.md`](./SPEC.md). Detailed ChatGPT/tunnel guide: [`docs/CHATGPT.md`](./docs/CHATGPT.md).
 
+## Reliability updates and existing installations
+
+For an existing installation, use the identified blue/green release workflow in [Reliability operation](docs/RELIABILITY.md), not an in-place reinstall. The initial installer preserves configuration and pins tunnel-client 0.0.14. The upgrade path additionally verifies an immutable runtime, tests a candidate, coordinates recovery, switches tunnels with rollback protection, and leaves the previous backend's active work untouched.
+
+Long operations can use opt-in durable `exec.start/status/output/cancel/list` tools. `fs.replace` provides atomic expected-hash file replacement without changing legacy `fs.write` semantics. `system.info.runtime` identifies the actual running release and configuration. [Desktop-agent update instructions](docs/DESKTOP-UPDATE.md) cover local Linux/systemd rollout when the desktop connector is unreachable.
+
 ## Capabilities
 
 Every family except `system.info` is opt-in. Disabled capability families are omitted from MCP tool discovery where practical. Desktop-facing capabilities also require the master `desktop.hostDisplayAccess` grant.
@@ -240,6 +246,7 @@ git clone https://github.com/alexcodeplace/chatgpt-mcp.git
 cd chatgpt-mcp
 corepack pnpm@11.20.0 install
 corepack pnpm@11.20.0 gate
+python3 -m unittest discover -s test -p '*_test.py' -v
 ```
 
 `pnpm gate` runs type checking, behavioral tests, and the TypeScript build.
@@ -359,9 +366,10 @@ corepack pnpm@11.20.0 typecheck
 corepack pnpm@11.20.0 test
 corepack pnpm@11.20.0 build
 corepack pnpm@11.20.0 gate
+python3 -m unittest discover -s test -p '*_test.py' -v
 ```
 
-GitHub Actions runs the same gate on pushes and pull requests and syntax-checks the installer scripts.
+GitHub Actions runs the same TypeScript gate, Python recovery/deployment fault tests, and installer syntax checks on pushes and pull requests. Dependencies install from the frozen lockfile.
 
 ## Platform limitations
 

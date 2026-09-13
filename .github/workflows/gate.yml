@@ -22,5 +22,6 @@ jobs:
           node-version: 22
       - run: bash -n install.sh scripts/tunnel-status.sh scripts/tunnel-uninstall.sh
       - run: node -e 'JSON.parse(require("fs").readFileSync("config.full.example.json", "utf8"))'
-      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm install --frozen-lockfile
+      - run: python3 -m unittest discover -s test -p "*_test.py" -v
       - run: pnpm gate

@@ -1,3 +1,5 @@
+import { diagnosticId, errorCategory, runtimeIdentity, trace } from '../diagnostics.js';
+import { registerJobTools } from './register-job-tools.js';
 import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { ComputerAdapter } from '../adapter/computer-adapter.js';
@@ -47,7 +49,7 @@ function failure(error: unknown, operation: string): CallToolResult {
   const body = isComputerAdapterError(error)
     ? { code: error.code, message: error.message, operation: error.operation, ...(error.details ? { details: error.details } : {}) }
     : { code: 'OS_ERROR', message: 'Unexpected computer adapter failure.', operation };
-  return { content: [{ type: 'text', text: JSON.stringify({ error: body }) }], isError: true };
+  return { content: [{ type: 'text', text: JSON.stringify({ error: { ...body, category: errorCategory(body.code), diagnosticId: diagnosticId(), retryable: body.code === 'OVERLOADED' } }) }], isError: true };
 }
 
 function enforceTransportBudget(result: CallToolResult, operation: string): CallToolResult {
@@ -72,10 +74,18 @@ async function run(
   message?: (result: Record<string, unknown>) => string,
   admissionOverride?: AdmissionClass,
 ): Promise<CallToolResult> {
+  const id = diagnosticId();
+  const started = performance.now();
+  trace('tool_received', { requestId: id, operation });
   try {
-    const result = await concurrency.run(operation, fn, signal, admissionOverride);
+    const result = await concurrency.run(operation, async () => {
+      trace('tool_started', { requestId: id, operation });
+      return fn();
+    }, signal, admissionOverride);
+    trace('tool_completed', { requestId: id, operation, elapsedMs: Math.round(performance.now() - started) });
     return enforceTransportBudget(success(result, message?.(result)), operation);
   } catch (error) {
+    trace('tool_failed', { requestId: id, operation, code: isComputerAdapterError(error) ? error.code : 'OS_ERROR', elapsedMs: Math.round(performance.now() - started) });
     return failure(error, operation);
   }
 }
@@ -90,11 +100,12 @@ export function registerTools(
     'system.info',
     {
       title: 'System Info',
-      description: 'Use this to inspect the computer identity/runtime and see which local capability families are currently granted.',
+      description: 'Inspect fresh runtime identity and granted capabilities. Only an explicit capability=false or a fresh policy denial establishes disabled access. Timeouts, 502, missing tools in a cached connector, upstream safety-check failures, and disconnects are not evidence of read-only access. OVERLOADED is capacity pressure. Never blindly replay a state-changing command after losing its response; retrieve its durable job instead.',
       inputSchema: z.object({}),
       outputSchema: z.object({
         hostname: z.string(), platform: z.string(), architecture: z.string(), release: z.string(),
         uptimeSeconds: z.number(), cwd: z.string(),
+        runtime: z.record(z.string(), z.unknown()),
         capabilities: z.object({
           filesystemRead: z.boolean(), filesystemWrite: z.boolean(), filesystemRoots: z.number().int(),
           shell: z.boolean(), processList: z.boolean(), processKill: z.boolean(), service: z.boolean(),
@@ -105,6 +116,7 @@ export function registerTools(
     },
     async (_args, ctx) => run('system.info', concurrency, ctx.mcpReq.signal, async () => ({
       ...(await adapter.systemInfo()),
+      runtime: runtimeIdentity(config),
       capabilities: {
         filesystemRead: config.filesystem.read,
         filesystemWrite: config.filesystem.write,
@@ -157,7 +169,7 @@ export function registerTools(
       'fs.write',
       {
         title: 'Write File',
-        description: 'Use this to create, overwrite, or append UTF-8 text inside the granted filesystem roots.',
+        description: 'Create, overwrite, or append UTF-8 text inside the granted roots with legacy write semantics. Prefer fs.replace for atomic conditional edits when available; never blindly repeat an append after losing its response.',
         inputSchema: z.object({
           path: pathInput,
           content: z.string(),
@@ -218,12 +230,24 @@ export function registerTools(
     );
   }
 
+  if (config.filesystem.read && config.filesystem.write && config.filesystem.roots.length > 0 && adapter.replaceFile !== undefined) {
+    server.registerTool('fs.replace', {
+      title: 'Atomic Conditional File Replacement',
+      description: 'Preferred for editing a regular file. Requires its current SHA-256 (or null for a new file). Stages and syncs content before atomic replacement. A changed hash returns CONFLICT without overwriting. Rejects symlinks and frozen directory entries. Serializes cooperating MCP replacements; not a kernel compare-and-swap against external writers.',
+      inputSchema: z.object({ path: pathInput, content: z.string(), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }),
+      outputSchema: z.object({ path: z.string(), sha256: z.string() }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    }, async ({ path, content, expectedSha256 }, ctx) => run('fs.replace', concurrency, ctx.mcpReq.signal, async () => ({ path, ...await adapter.replaceFile!(path, content, expectedSha256) })));
+  }
+
+  registerJobTools(server, config, concurrency);
+
   if (config.shell.enabled) {
     server.registerTool(
       'shell.exec',
       {
         title: 'Execute Command',
-        description: 'Use this to execute one locally allowed executable with an argument array. It never inserts an implicit shell.',
+        description: 'Execute a short locally allowed command without an implicit shell. Prefer exec.start/status/output for long work when available. A lost response does not prove the command failed; inspect its effects before retrying. OVERLOADED means capacity pressure, not missing permissions.',
         inputSchema: z.object({
           command: z.string().min(1),
           args: z.array(z.string()).default([]),
