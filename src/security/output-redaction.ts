@@ -205,7 +205,7 @@ export class OutputRedactor {
           try { this.learn(JSON.parse(text)); } catch { /* Not all credential files are JSON. */ }
           for (const line of text.split(/\r?\n/)) {
             const plain = line.trim();
-            if (plain && !/\s/.test(plain) && !/^(?:\{|\[|#|;|[A-Za-z_][\w]*=)/.test(plain)) this.add(unquote(plain));
+            if (plain && !/\s/.test(plain) && !/^(?:\{|\[|#|;|[A-Za-z_][\w]*=(?![=]*$))/.test(plain)) this.add(unquote(plain));
           }
         } catch (error) {
           if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) this.suppressText = true;

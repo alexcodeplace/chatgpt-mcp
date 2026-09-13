@@ -330,3 +330,14 @@ test('reading a project log discovers its neighboring credential sources without
     assert.equal((result.structuredContent as Record<string, unknown>)['content'], `build authenticated ${MASK}`);
   } finally { await h.close(); await f.cleanup(); }
 });
+
+test('raw padded Base64 credentials are not mistaken for environment assignments', async () => {
+  const f = await fixture();
+  try {
+    const token = randomBytes(32).toString('base64');
+    await writeFile(f.path, token + '\n');
+    const redactor = await OutputRedactor.create(f.config, { cwd: f.directory });
+    assert.equal(redactor.text(token), MASK);
+    assert.equal(redactor.text(Buffer.from(token).toString('base64')), MASK);
+  } finally { await f.cleanup(); }
+});
