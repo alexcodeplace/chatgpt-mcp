@@ -381,3 +381,18 @@ test('output suppression retains public enum values and directory-list schema', 
     assert.ok(entries.every(entry => entry.name === MASK));
   } finally { await h.close(); await f.cleanup(); }
 });
+
+
+test('returned source and logs do not teach ordinary values as secrets', async () => {
+  const redactor = await OutputRedactor.create(parseConfig({}));
+  const text = 'const token = value;\nvalue.length value.map\napi_key=banana\nnormal banana workflow';
+  const result = await redactor.result({
+    content: [{ type: 'text', text }],
+    structuredContent: { stdout: text },
+  }, 'shell.exec');
+  const output = result.content[0]?.type === 'text' ? result.content[0].text : '';
+  assert.match(output, /const token = \[SECRET_REDACTED\];/);
+  assert.match(output, /value\.length value\.map/);
+  assert.match(output, /api_key=\[SECRET_REDACTED\]/);
+  assert.match(output, /normal banana workflow/);
+});

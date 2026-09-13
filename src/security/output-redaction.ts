@@ -240,8 +240,6 @@ export class OutputRedactor {
   text(value: string): string {
     if (value.length === 0) return value;
     if (this.suppressText) return SECRET_REDACTED;
-    this.learnText(value);
-    if (this.suppressText) return SECRET_REDACTED;
     if (this.dirty) {
       this.exact = this.values.size === 0 ? undefined : new RegExp([...this.values].sort((a, b) => b.length - a.length)
         .map(secret => secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
@@ -263,7 +261,6 @@ export class OutputRedactor {
 
   value<T>(input: T): T {
     try {
-      this.learn(input);
       const visit = (value: unknown, depth = 0): unknown => {
         if (depth > 32) return SECRET_REDACTED;
         if (typeof value === 'string') return this.text(value);
@@ -287,8 +284,20 @@ export class OutputRedactor {
     await this.refresh();
     const input = this.input as Record<string, unknown> | null;
     let structured = result.structuredContent;
-    this.learn(structured);
-    for (const part of result.content) if (part.type !== 'image' && part.type !== 'audio') this.learn(part);
+    const learnStructuredSecrets = (value: unknown, depth = 0): void => {
+      if (depth > 32 || value === null || typeof value !== 'object') return;
+      if (Array.isArray(value)) { for (const child of value) learnStructuredSecrets(child, depth + 1); return; }
+      for (const [key, child] of Object.entries(value)) {
+        if (isSecretName(key)) this.add(child);
+        else learnStructuredSecrets(child, depth + 1);
+      }
+    };
+    learnStructuredSecrets(structured);
+    // Never learn arbitrary returned text as a secret source. Doing so lets source code,
+    // logs, or diagnostics such as `token = value` poison later output and over-redact
+    // unrelated occurrences of `value`. Secret values are learned only from trusted
+    // inputs, environment, and credential files; secret-named structured fields are
+    // still redacted directly by value().
     if (operation === 'fs.read' && !result.isError && typeof input?.['path'] === 'string') {
       const path = resolve(input['path']);
       let canonical = path;
