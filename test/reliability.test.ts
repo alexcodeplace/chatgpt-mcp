@@ -89,7 +89,8 @@ test('timeout kills TERM-ignoring descendants even after all output pipes close'
         const info = await readFile(`/proc/${childPid}/stat`, 'utf8');
         state = info.slice(info.lastIndexOf(')') + 2).split(' ')[0]!;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        // /proc may disappear before open (ENOENT) or during read (ESRCH).
+        if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
         state = 'gone';
       }
       if (state === 'gone' || state === 'Z') break;
