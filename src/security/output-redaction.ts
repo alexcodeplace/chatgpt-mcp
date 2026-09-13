@@ -6,6 +6,19 @@ import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ChatGptMcpConfig } from '../config.js';
 
 export const SECRET_REDACTED = '[SECRET_REDACTED]';
+// These values are defined by our public tool schemas, not supplied credentials.
+// Sanitizing them or object property names would invalidate an otherwise successful
+// MCP response. Credential-bearing strings remain protected at the value boundary.
+const PUBLIC_SCHEMA_VALUES: Readonly<Record<string, readonly string[]>> = {
+  type: ['text', 'image', 'audio', 'resource', 'resource_link', 'file', 'directory', 'symlink', 'other'],
+  mimeType: ['image/png'],
+  state: ['starting', 'running', 'succeeded', 'failed', 'cancelled', 'unknown'],
+  mode: ['create', 'overwrite', 'append', 'output-only'],
+  action: ['start', 'stop', 'restart'],
+  button: ['left', 'middle', 'right'],
+  stream: ['stdout', 'stderr'],
+};
+
 const MAX_FILES = 128;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_BYTES = 1024 * 1024;
@@ -88,8 +101,15 @@ export class OutputRedactor {
     }
   }
 
-  private learnText(text: string): void {
-    for (const match of text.matchAll(ASSIGNMENT)) if (isSecretName(match[2]!)) this.add(unquote(match[3]!));
+  private learnText(text: string, credentialSource = false): void {
+    for (const match of text.matchAll(ASSIGNMENT)) {
+      const raw = match[3]!;
+      // Command/source text contains variable references such as credential=value.
+      // They are not literal keys. Credential files are trusted value sources;
+      // environment/structured credential fields are learned separately as values.
+      const reference = /^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(raw);
+      if (isSecretName(match[2]!) && (credentialSource || !reference)) this.add(unquote(raw));
+    }
     for (const match of text.matchAll(AUTH)) this.add(match[3]);
     for (const match of text.matchAll(CLI)) if (isSecretName(match[2]!)) this.add(unquote(match[3]!));
     for (const match of text.matchAll(PRIVATE_KEY)) {
@@ -125,7 +145,10 @@ export class OutputRedactor {
     const input = this.input as Record<string, unknown> | null;
     const cwd = resolve(typeof input?.['cwd'] === 'string' ? input['cwd'] : process.cwd());
     const bases = new Set([cwd]);
-    if (typeof input?.['path'] === 'string') bases.add(dirname(resolve(input['path'])));
+    if (typeof input?.['path'] === 'string') {
+      bases.add(resolve(input['path']));
+      bases.add(dirname(resolve(input['path'])));
+    }
     for (const base of bases) {
       let ancestor = base;
       for (let depth = 0; depth < 12 && this.allowed(ancestor); depth++) {
@@ -201,7 +224,7 @@ export class OutputRedactor {
           if (bytesRead > MAX_FILE_BYTES) { this.suppressText = true; break; }
           totalBytes += bytesRead;
           const text = buffer.subarray(0, bytesRead).toString('utf8');
-          this.learnText(text);
+          this.learnText(text, true);
           try { this.learn(JSON.parse(text)); } catch { /* Not all credential files are JSON. */ }
           for (const line of text.split(/\r?\n/)) {
             const plain = line.trim();
@@ -246,7 +269,10 @@ export class OutputRedactor {
         if (typeof value === 'string') return this.text(value);
         if (Array.isArray(value)) return value.map(child => visit(child, depth + 1));
         if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, child]) => [
-          this.suppressText ? key : this.text(key), isSecretName(key) && (typeof child === 'string' || typeof child === 'number') ? SECRET_REDACTED : visit(child, depth + 1),
+          key,
+          typeof child === 'string' && PUBLIC_SCHEMA_VALUES[key]?.includes(child) ? child
+            : isSecretName(key) && (typeof child === 'string' || typeof child === 'number') ? SECRET_REDACTED
+              : visit(child, depth + 1),
         ]));
         return value;
       };

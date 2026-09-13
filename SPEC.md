@@ -628,3 +628,9 @@ permission denial. Tool-visible secret text MUST become `[SECRET_REDACTED]`.
    stdout/stderr, split writes, nested/error payloads, partial file reads, rotation,
    encodings, durable persistence/pagination, legacy output, missing/malformed sources,
    discovery budgets, benign-output preservation and unchanged existing policies.
+
+Output redaction MUST preserve protocol property names and public schema enums.
+A credential whose value happens to equal a field name must not rename that field.
+Unquoted identifier references in command/source text are not literal credentials;
+credential-file assignments and explicit sensitive fields remain value sources.
+Protocol-collision regressions and a real installed provider check are required.

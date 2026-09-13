@@ -341,3 +341,43 @@ test('raw padded Base64 credentials are not mistaken for environment assignments
     assert.equal(redactor.text(Buffer.from(token).toString('base64')), MASK);
   } finally { await f.cleanup(); }
 });
+
+test('source variable references cannot rename MCP response fields', async () => {
+  const f = await fixture(); const adapter = new LocalComputerAdapter(f.config);
+  adapter.exec = async () => ({ exitCode: 0, stdout: 'ordinary text diagnostics', stderr: '', durationMs: 1, timedOut: false });
+  const h = await harness(f.config, adapter);
+  try {
+    const result = await h.client.callTool({ name: 'shell.exec', arguments: { command: 'python3', args: ['-c', 'credential=' + ['te', 'xt'].join('')], cwd: f.directory } });
+    assert.notEqual(result.isError, true);
+    assert.equal(result.content[0]?.type === 'text' ? result.content[0].text : '', 'ok');
+    assert.equal((result.structuredContent as Record<string, unknown>)['stdout'], 'ordinary text diagnostics');
+  } finally { await h.close(); await f.cleanup(); }
+});
+
+test('known credential collisions redact values but preserve protocol property names', async () => {
+  const f = await fixture(); const adapter = new LocalComputerAdapter(f.config);
+  const h = await harness(f.config, adapter);
+  try {
+    for (const word of ['te'+'xt', 'std'+'out', 'exit'+'Code', 'structured'+'Content']) {
+      adapter.exec = async () => ({ exitCode: 7, stdout: word, stderr: '', durationMs: 1, timedOut: false });
+      const result = await h.client.callTool({ name: 'shell.exec', arguments: { command: 'python3', env: { TEST_API_TOKEN: word }, cwd: f.directory } });
+      assert.notEqual(result.isError, true);
+      assert.equal(result.content[0]?.type, 'text');
+      assert.equal(typeof (result.content[0] as { text?: string }).text, 'string');
+      assert.equal((result.structuredContent as Record<string, unknown>)['stdout'], MASK);
+      assert.equal((result.structuredContent as Record<string, unknown>)['exitCode'], 7);
+    }
+  } finally { await h.close(); await f.cleanup(); }
+});
+
+test('output suppression retains public enum values and directory-list schema', async () => {
+  const f = await fixture(); const h = await harness(f.config);
+  try {
+    await writeFile(join(f.directory, '.secrets', 'large.data'), 'x'.repeat(70 * 1024));
+    const result = await h.client.callTool({ name: 'fs.list', arguments: { path: f.directory } });
+    assert.notEqual(result.isError, true);
+    const entries = (result.structuredContent as { entries: { name: string; type: string }[] }).entries;
+    assert.ok(entries.some(entry => entry.type === 'directory'));
+    assert.ok(entries.every(entry => entry.name === MASK));
+  } finally { await h.close(); await f.cleanup(); }
+});
