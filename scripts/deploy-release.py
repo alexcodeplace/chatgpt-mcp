@@ -140,6 +140,41 @@ def working_directory(config_path, previous_unit, explicit=None):
     return path
 
 
+def backend_unit_text(revision, release, cwd, config_path, node):
+    # WorkingDirectory takes a path, not an ExecStart-style quoted argument.
+    # Literal quotes make an absolute path invalid to systemd's path parser.
+    return f'''[Unit]
+Description=Identified MCP runtime {revision}
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+[Service]
+Type=simple
+WorkingDirectory={str(cwd).replace('%', '%%')}
+Environment=CHATGPT_MCP_CONFIG={config_path}
+Environment=CHATGPT_MCP_RELEASE={revision}
+Environment=CHATGPT_MCP_TRACE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET
+ExecStartPre=/usr/bin/python3 "{release}/scripts/release.py" verify "{release}"
+ExecStart="{node}" "{release}/dist/src/http.js"
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=5
+KillMode=control-group
+TasksMax=512
+LimitNOFILE=65536
+MemoryHigh=6G
+MemoryMax=9G
+CPUWeight=80
+UMask=0077
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
+[Install]
+WantedBy=default.target
+'''
+
+
 def staging_config(config, directory):
     """Candidate fault tests must never submit or expire jobs in the live ledger."""
     candidate = copy.deepcopy(config)
@@ -216,40 +251,12 @@ def deploy(args):
     if config.get('shell', {}).get('enabled') and any(command in config['shell'].get('allowedCommands', []) for command in ['*', 'node']):
         settings['shellCanary'] = {'command': 'node', 'args': ['-e', "process.stdout.write('mcp-shell-canary')"], 'expectedStdout': 'mcp-shell-canary'}
     atomic_json(directory / 'candidate-settings.json', settings)
-    unit_text = f'''[Unit]
-Description=Identified MCP runtime {revision}
-After=network.target
-StartLimitIntervalSec=300
-StartLimitBurst=3
-[Service]
-Type=simple
-WorkingDirectory="{cwd}"
-Environment=CHATGPT_MCP_CONFIG={config_path}
-Environment=CHATGPT_MCP_RELEASE={revision}
-Environment=CHATGPT_MCP_TRACE=1
-Environment=PYTHONDONTWRITEBYTECODE=1
-UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET
-ExecStartPre=/usr/bin/python3 "{release}/scripts/release.py" verify "{release}"
-ExecStart="{node}" "{release}/dist/src/http.js"
-Restart=on-failure
-RestartSec=10
-TimeoutStopSec=5
-KillMode=control-group
-TasksMax=512
-LimitNOFILE=65536
-MemoryHigh=6G
-MemoryMax=9G
-CPUWeight=80
-UMask=0077
-LogRateLimitIntervalSec=30s
-LogRateLimitBurst=1000
-[Install]
-WantedBy=default.target
-'''
+    unit_text = backend_unit_text(revision, release, cwd, config_path, node)
     atomic_text(unit_path, unit_text, 0o644)
-    systemctl('daemon-reload')
-    systemctl('enable', '--now', unit)
     try:
+        run('systemd-analyze', '--user', 'verify', str(unit_path))
+        systemctl('daemon-reload')
+        systemctl('enable', '--now', unit)
         results = validate(settings, unit)
         results['stagingJobLedgerIsolated'] = candidate.get('jobs', {}).get('directory') != config.get('jobs', {}).get('directory') if config.get('jobs', {}).get('enabled') else 'not enabled'
         # All destructive/restart canaries have finished. Load the production
