@@ -102,7 +102,11 @@ test('full queue rejects immediately with OVERLOADED and never exceeds bounds', 
   await Promise.all([a, b, d]);
 });
 
-test('queue timeout returns OVERLOADED and removes the queued request', async () => {
+test('queue timeout returns OVERLOADED and removes the queued request', { timeout: 1_000 }, async (t) => {
+  // Production has an HTTP listener, but this unit fixture has only promises.
+  // Model that live handle so the deliberately unref'ed queue timer can fire.
+  const liveHandle = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(liveHandle));
   const c = controller({ maxConcurrent: 2, reservedControlSlots: 1, shellMaxConcurrent: 1, maxQueue: 2, queueTimeoutMs: 25 });
   const running = deferred();
   const active = c.run('fs.read.active', async () => running.promise);

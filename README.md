@@ -18,6 +18,51 @@ ChatGPT chooses which tool to call. `chatgpt-mcp` validates the call against the
 
 Architecture: [`SPEC.md`](./SPEC.md). Detailed ChatGPT/tunnel guide: [`docs/CHATGPT.md`](./docs/CHATGPT.md).
 
+## What you can use it for
+
+Use chatgpt-mcp when an assistant needs to work with files or programs on a Linux machine instead of asking you to paste terminal output and screenshots into every conversation. Enable only the operations that workflow needs.
+
+For example, let it inspect a project directory and run an allowed test command; capture the X11 display of a disposable browser session and inspect a UI; or check the state of one explicitly allowed systemd service. Each action remains subject to the configured capabilities and the operating-system user's permissions. Enabling a general shell gives the assistant broad same-user code execution, not a sandbox.
+
+## Choose an installation path
+
+**Minimal/manual:** use `config.example.json`, which exposes only `system.info` initially. Build the server, connect over stdio or loopback HTTP, confirm identity, and then add narrowly scoped filesystem roots and commands. This is the appropriate starting point when you do not want full computer control.
+
+**Quick installer:** the ChatGPT tunnel walkthrough below starts from `config.full.example.json`, which grants broad filesystem, shell and desktop authority. Review that choice before running `./install.sh`; it is not a least-privilege default. Prefer a disposable Linux VM for broad access. OpenAI tunnel identity and runtime-key setup are separate from model inference and are required for that transport.
+
+**Existing managed installation:** first identify who owns its service/configuration. An Overdeck-managed installation should be updated through Overdeck, not overwritten with a second standalone service. Preserve active work and do not restart the backend from the same connection that depends on it without an agreed recovery path.
+
+## First useful session
+
+After the connection is available, ask the client to call `system.info` and confirm the expected host and grants. Then list one allowed non-sensitive directory. Next run a small allowed command with an explicit working directory and bounded output. Enable desktop access only when needed, select an explicit X11 display, and inspect it before sending input; never assume an existing display belongs to a disposable test session.
+
+Example requests:
+
+```text
+Use system.info to confirm the connected host and enabled capabilities.
+List the project directory I authorized. Do not modify anything.
+Run the project's documented test command in that directory and return its
+exit code plus the relevant failure lines, not the entire log.
+```
+
+## Ask an agent to install and set it up
+
+```text
+Set up chatgpt-mcp using https://github.com/alexcodeplace/chatgpt-mcp
+and the current public README. Inspect this Linux machine and any existing
+MCP/Overdeck-managed service first; do not replace a managed or active backend.
+Start from config.example.json and system.info only. Ask me to approve the
+specific filesystem roots, executable commands and any desktop grants before
+enabling them; do not silently use config.full.example.json or wildcard shell.
+Install the pinned dependencies and build, then use stdio or loopback HTTP for
+the first read-only identity test. For a ChatGPT Secure MCP Tunnel, walk me
+through current official OpenAI setup and have me enter credentials locally;
+never print, commit, or paste keys into chat. Keep the listener private.
+Verify the connection with system.info and an allowed directory read, without
+changing project files or touching my active browser sessions. Finish with the
+connection details, actual test results, status commands and rollback plan.
+```
+
 ## Capabilities
 
 Every family except `system.info` is opt-in. Disabled capability families are omitted from MCP tool discovery where practical. Desktop-facing capabilities also require the master `desktop.hostDisplayAccess` grant.
