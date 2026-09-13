@@ -21,6 +21,10 @@ For a previously upgraded installation, read `~/.config/chatgpt-mcp/active.json`
 
 The automated service rollout below is for Linux with systemd user services. On Windows or macOS, the core source and pinned downloader are available, but the supervisor/recovery integration requires a native implementation and local validation. Do not run the systemd commands or claim the desktop update is complete on those systems.
 
+### When the old desktop service/profile no longer exists
+
+The existing-service upgrade below requires an actual installed profile and service. Do not fabricate a previous service, reuse a VM identity, or repurpose a separate `overdeck-host` deployment. Follow [Fresh desktop bootstrap](DESKTOP-BOOTSTRAP.md) instead, using a commit that includes the explicit `--bootstrap` option. The original August-19 installer launched stdio beneath `chatgpt-mcp-tunnel.service`; the separate HTTP backend arrived on August 24. Those source defaults are not proof of what a particular desktop installed or removed.
+
 ## 2. Prepare a separate worktree at the validated revision
 
 Use the existing repository and its authorized remote. The validated source is pushed to the private `platform-modules/chatgpt-mcp` repository. A desktop clone whose only remote is the public `alexcodeplace/chatgpt-mcp` mirror may not contain this commit; fetch it from the authorized private repository or obtain an owner-supplied source bundle instead of substituting an older public commit. Substitute the exact full commit from the VM completion report for `REVISION`; do not guess a hash or silently use a different branch.
