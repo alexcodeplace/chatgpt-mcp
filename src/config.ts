@@ -230,7 +230,13 @@ const jobsSchema = z.object({
   retentionSeconds: z.number().int().min(60).max(2592000).default(604800),
 }).refine(value => value.outputRetentionSeconds <= value.retentionSeconds, 'output retention cannot exceed ledger retention');
 
+const outputRedactionSchema = z.object({
+  files: z.array(z.string().min(1)).max(128).default([]),
+  directories: z.array(z.string().min(1)).max(32).default([]),
+});
+
 const configSchema = z.object({
+  outputRedaction: outputRedactionSchema.prefault({}),
   jobs: jobsSchema.prefault({}),
   execution: executionSchema.default({ defaultBackend: 'local', lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, localIsolation: { enabled: false, scope: 'user', command: 'systemd-run', managerCommand: 'systemctl', privilegeCommand: 'sudo', privilegeArgs: ['-n'], tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
   concurrency: concurrencySchema.default({ maxConcurrent: 48, reservedControlSlots: 8, shellMaxConcurrent: 8, maxQueue: 64, queueTimeoutMs: 30_000 }),
@@ -273,6 +279,10 @@ function deepFreeze<T>(value: T): T {
 function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
   return {
     ...config,
+    outputRedaction: {
+      files: config.outputRedaction.files.map(path => resolve(path)),
+      directories: config.outputRedaction.directories.map(path => resolve(path)),
+    },
     http: {
       ...config.http,
       allowedHosts: config.http.allowedHosts.map(value => value.trim()),

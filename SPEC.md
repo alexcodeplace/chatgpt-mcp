@@ -590,3 +590,41 @@ A read+write grant on an adapter implementing `replaceFile` exposes `fs.replace(
 `system.info.runtime` includes release identity, loaded configuration fingerprint, process identity and durable-execution availability. New error codes are `CONFLICT` and `OUTCOME_UNKNOWN`; `OVERLOADED` remains capacity pressure, not a permission or tunnel diagnosis. Diagnostics must not contain request arguments, environment values, output or credentials.
 
 Recovery is a separate local supervisor with one locked backend owner and independent per-profile states. It checks fresh MCP capabilities and control-plane polling, never restores permissions/configuration automatically, persists restart budgets before actions, and performs no unconditional restart loop. Deployments share that lock, verify an immutable release inventory, exercise a private candidate, arm an independent rollback timer, and preserve the previous backend's running resources. `docs/DESKTOP-UPDATE.md` defines the local-agent rollout procedure and platform limitations.
+
+## Output-only credential protection
+
+Owner requirement (2026-09-13): authorized commands may consume local credentials
+without revealing their values to an agent or chat. Credential presence is not a
+permission denial. Tool-visible secret text MUST become `[SECRET_REDACTED]`.
+
+1. Apply one common redaction boundary to all registered tool results, including
+   structured content, textual content, error details, process arguments and URLs.
+   Preserve commands, arguments, environment, file contents on disk, exit status,
+   existing capability grants and authorization checks. Never replace a credential
+   in the child environment with the display marker.
+2. Enable protection by default. Discover sensitive environment values, the MCP
+   bearer token, configured outputRedaction.files/directories, common user credential
+   files, project .secrets/.env/.dev.vars files near the working directory and
+   credential paths referenced by tool arguments. Inspect files as data, never as
+   executable shell. Bound discovery, regular-file reads, memory and recursion.
+3. Learn both before and after execution, retaining pre-operation values through
+   rotations/deletions. Mask recognized provider formats, credential assignments,
+   authentication headers, credential-bearing URLs and common encodings of known
+   values. Return credential-file reads as the marker, not a permission error,
+   including adapter-returned partial contents. Existing read-size and permission errors remain unchanged. Public source files remain readable.
+4. Redact durable output in its worker before persistence and pagination. Mark this
+   format in the ledger. Legacy output without that provenance is displayed as a
+   marker because its former credential context cannot reliably be reconstructed.
+   Job execution, status, cancellation and idempotency are unchanged.
+5. Never serialize discovered values, request payloads or parser exceptions into
+   diagnostics. Redactor failures suppress output, not command execution. Preserve
+   image/audio bytes: text redaction is not screenshot OCR or visual censorship.
+6. The wrapper is accidental-disclosure protection, not a sandbox against hostile
+   same-user programs, arbitrary transformations or deliberately fragmented keys.
+   Unknown opaque values in undiscoverable locations cannot be identified reliably.
+   Do not claim that this local implementation changes upstream OpenAI safety checks.
+7. Regression acceptance includes an actual subprocess consuming a file credential
+   to authenticate to a loopback fixture, unchanged exit codes and side effects,
+   stdout/stderr, split writes, nested/error payloads, partial file reads, rotation,
+   encodings, durable persistence/pagination, legacy output, missing/malformed sources,
+   discovery budgets, benign-output preservation and unchanged existing policies.

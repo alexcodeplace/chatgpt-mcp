@@ -25,3 +25,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: python3 -m unittest discover -s test -p "*_test.py" -v
       - run: pnpm gate
+      - name: Package verified runtime inputs
+        run: tar -czf mcp-runtime.tgz dist/src node_modules
+      - name: Retain exact-revision runtime for managed deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-runtime-${{ github.sha }}
+          path: mcp-runtime.tgz
+          retention-days: 7
+          if-no-files-found: error
