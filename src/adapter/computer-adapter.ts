@@ -25,7 +25,7 @@ export interface ExecRequest {
   signal?: AbortSignal;
 }
 
-export type ShellExecutionClass = 'shell-local' | 'shell-remote';
+export type ShellExecutionClass = 'shell-local' | 'shell-local-long' | 'shell-remote';
 
 export interface ExecResult {
   exitCode: number | null;
@@ -87,6 +87,7 @@ export interface ComputerAdapter {
   listDirectory(path: string): Promise<readonly FileEntry[]>;
   readFile(path: string, maxBytes?: number): Promise<string>;
   writeFile(path: string, content: string, mode: 'create' | 'overwrite' | 'append'): Promise<void>;
+  replaceFile?(path: string, content: string, expectedSha256: string | null): Promise<{ sha256: string }>;
   makeDirectory(path: string, recursive: boolean): Promise<void>;
   movePath(source: string, destination: string): Promise<void>;
   deletePath(path: string, recursive: boolean): Promise<void>;

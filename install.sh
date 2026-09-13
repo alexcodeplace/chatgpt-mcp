@@ -5,8 +5,8 @@ PROFILE_NAME="${CHATGPT_MCP_PROFILE:-chatgpt-computer}"
 TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel-${PROFILE_NAME}.service"
 LEGACY_TUNNEL_SERVICE_NAME="chatgpt-mcp-tunnel.service"
 MCP_SERVICE_NAME="chatgpt-mcp.service"
-WATCHDOG_SERVICE_NAME="chatgpt-mcp-watchdog-${PROFILE_NAME}.service"
-WATCHDOG_TIMER_NAME="chatgpt-mcp-watchdog-${PROFILE_NAME}.timer"
+WATCHDOG_SERVICE_NAME="chatgpt-mcp-recovery.service"
+WATCHDOG_TIMER_NAME="chatgpt-mcp-recovery.timer"
 HEALTH_PORT="${CHATGPT_MCP_HEALTH_PORT:-}"
 HEALTH_ADDR=""
 PNPM_VERSION="11.20.0"
@@ -170,66 +170,9 @@ select_pnpm() {
 }
 
 install_tunnel_client() {
-  if command -v tunnel-client >/dev/null 2>&1; then
-    TUNNEL_CLIENT="$(command -v tunnel-client)"
-    return
-  fi
-
   ensure_base_tools
-  local os arch target tmp metadata asset_url checksum_url archive found companion checksum_line
-  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-  case "$(uname -m)" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) die "Unsupported architecture for automatic tunnel-client install: $(uname -m)" ;;
-  esac
-  [[ "$os" == linux ]] || die "Automatic tunnel-client install supports Linux only. Download it from https://github.com/openai/tunnel-client/releases/latest"
-  target="$os-$arch.zip"
-
-  say "Installing the latest official OpenAI tunnel-client"
-  tmp="$(mktemp -d)"
-  metadata="$tmp/release.json"
-  curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/openai/tunnel-client/releases/latest -o "$metadata" \
-    || die "Could not query the official tunnel-client release."
-
-  asset_url="$(python3 - "$metadata" "$target" <<'PY'
-import json, sys
-release=json.load(open(sys.argv[1], encoding='utf-8'))
-target=sys.argv[2]
-for asset in release.get('assets', []):
-    name=asset.get('name','')
-    if name == target or name.endswith('-'+target):
-        print(asset.get('browser_download_url','')); break
-PY
-)"
-  checksum_url="$(python3 - "$metadata" <<'PY'
-import json, sys
-release=json.load(open(sys.argv[1], encoding='utf-8'))
-for asset in release.get('assets', []):
-    if asset.get('name') == 'SHA256SUMS.txt':
-        print(asset.get('browser_download_url','')); break
-PY
-)"
-  [[ -n "$asset_url" ]] || die "Latest tunnel-client release has no $target archive."
-
-  archive="$tmp/$target"
-  curl -fL "$asset_url" -o "$archive"
-  if [[ -n "$checksum_url" ]] && command -v sha256sum >/dev/null 2>&1; then
-    curl -fsSL "$checksum_url" -o "$tmp/SHA256SUMS.txt"
-    checksum_line="$(grep -E "[[:space:]]+\*?$target$" "$tmp/SHA256SUMS.txt" | head -n1 || true)"
-    [[ -n "$checksum_line" ]] || die "Official checksum file did not contain $target."
-    (cd "$tmp" && printf '%s\n' "$checksum_line" | sha256sum -c -)
-  fi
-
-  unzip -q "$archive" -d "$tmp/unpacked"
-  found="$(find "$tmp/unpacked" -type f -name tunnel-client -print -quit)"
-  [[ -n "$found" ]] || die "Downloaded archive did not contain tunnel-client."
-  mkdir -p "$USER_BIN"
-  install -m 0755 "$found" "$USER_BIN/tunnel-client"
-  companion="$(find "$tmp/unpacked" -type f -name cloudflared -print -quit)"
-  [[ -z "$companion" ]] || install -m 0755 "$companion" "$USER_BIN/cloudflared"
-  TUNNEL_CLIENT="$USER_BIN/tunnel-client"
-  export PATH="$USER_BIN:$PATH"
+  TUNNEL_CLIENT="$(python3 "$REPO/scripts/install-tunnel.py")"
+  export PATH="$(dirname "$TUNNEL_CLIENT"):$PATH"
 }
 
 install_desktop_packages() {
@@ -286,7 +229,7 @@ write_launchers() {
 set -Eeuo pipefail
 : "${CHATGPT_MCP_REPO:?CHATGPT_MCP_REPO is required}"
 : "${CHATGPT_MCP_NODE_BIN:?CHATGPT_MCP_NODE_BIN is required}"
-export CHATGPT_MCP_CONFIG="$CHATGPT_MCP_REPO/config.local.json"
+export CHATGPT_MCP_CONFIG="${CHATGPT_MCP_CONFIG:-$CHATGPT_MCP_REPO/config.local.json}"
 if [[ -z "${XAUTHORITY:-}" && -f "$HOME/.Xauthority" ]]; then export XAUTHORITY="$HOME/.Xauthority"; fi
 exec "$CHATGPT_MCP_NODE_BIN" "$CHATGPT_MCP_REPO/dist/src/http.js"
 LAUNCHER
@@ -300,6 +243,8 @@ set -Eeuo pipefail
 API_FILE="$CHATGPT_MCP_REPO/.secrets/runtime-api-key"
 [[ -r "$API_FILE" ]] || { echo "Missing runtime API key: $API_FILE" >&2; exit 1; }
 export CONTROL_PLANE_API_KEY="$(head -n1 "$API_FILE" | tr -d '\r\n')"
+version="$("$TUNNEL_CLIENT_BIN" --version)"
+[[ "$version" == 0.0.14+* || "$version" == 0.0.14\ * || "$version" == 0.0.14 ]] || { echo 'TUNNEL_VERSION_MISMATCH: expected 0.0.14' >&2; exit 78; }
 exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
 LAUNCHER
   chmod 700 "$USER_LIB/run-mcp-http.sh" "$USER_LIB/run-tunnel.sh"
@@ -311,7 +256,8 @@ write_services() {
 [Unit]
 Description=chatgpt-mcp local HTTP service
 After=network.target
-StartLimitIntervalSec=0
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -320,8 +266,9 @@ Environment=CHATGPT_MCP_REPO=$REPO
 Environment=CHATGPT_MCP_NODE_BIN=$(command -v node)
 UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET
 ExecStart=$USER_LIB/run-mcp-http.sh
-Restart=always
-RestartSec=1
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=78
 TimeoutStopSec=5
 TasksMax=512
 LimitNOFILE=65536
@@ -338,7 +285,8 @@ SERVICE
 Description=OpenAI Secure MCP Tunnel for chatgpt-mcp ($PROFILE_NAME)
 Wants=network-online.target $MCP_SERVICE_NAME
 After=network-online.target $MCP_SERVICE_NAME
-StartLimitIntervalSec=0
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -348,8 +296,9 @@ Environment=TUNNEL_CLIENT_BIN=$TUNNEL_CLIENT
 Environment=CHATGPT_MCP_PROFILE=$PROFILE_NAME
 Environment=TUNNEL_CLIENT_PROFILE_DIR=$PROFILE_DIR
 ExecStart=$USER_LIB/run-tunnel.sh
-Restart=always
-RestartSec=1
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target
@@ -359,101 +308,7 @@ SERVICE
 }
 
 write_watchdog() {
-  local watchdog_script="$USER_LIB/watchdog-$PROFILE_NAME.sh"
-  local node_bin
-  node_bin="$(command -v node)"
-  cat > "$watchdog_script" <<WATCHDOG
-#!/usr/bin/env bash
-set -Eeuo pipefail
-REPO="$REPO"
-CONFIG="\$REPO/config.local.json"
-NODE_BIN="$node_bin"
-STATE_DIR="\${XDG_STATE_HOME:-\$HOME/.local/state}/chatgpt-mcp/$PROFILE_NAME"
-LAST_GOOD_CONFIG="\$STATE_DIR/config.last-good.json"
-
-check_url() {
-  local url="\$1"
-  local i
-  for i in 1 2 3; do
-    if /usr/bin/curl -fsS --max-time 2 "\$url" >/dev/null 2>&1; then
-      return 0
-    fi
-    /usr/bin/sleep 1
-  done
-  return 1
-}
-
-config_valid() {
-  [[ -r "\$1" ]] || return 1
-  (cd "\$REPO" && CHATGPT_MCP_CONFIG="\$1" "\$NODE_BIN" --input-type=module -e \
-    'import { loadConfig } from "./dist/src/config.js"; await loadConfig();') \
-    >/dev/null 2>&1
-}
-
-remember_last_good() {
-  config_valid "\$CONFIG" || return 0
-  /usr/bin/mkdir -p "\$STATE_DIR"
-  /usr/bin/chmod 700 "\$STATE_DIR"
-  if [[ ! -f "\$LAST_GOOD_CONFIG" ]] || ! /usr/bin/cmp -s "\$CONFIG" "\$LAST_GOOD_CONFIG"; then
-    /usr/bin/install -m 600 "\$CONFIG" "\$LAST_GOOD_CONFIG"
-  fi
-}
-
-restore_last_good() {
-  [[ -r "\$LAST_GOOD_CONFIG" ]] || return 1
-  config_valid "\$LAST_GOOD_CONFIG" || return 1
-  /usr/bin/cmp -s "\$CONFIG" "\$LAST_GOOD_CONFIG" && return 1
-  /usr/bin/cp -p "\$CONFIG" "\$CONFIG.watchdog-rejected" 2>/dev/null || true
-  /usr/bin/install -m 600 "\$LAST_GOOD_CONFIG" "\$CONFIG"
-  /usr/bin/systemd-cat -t chatgpt-mcp-watchdog echo 'restored last-known-good config after failed MCP restart' || true
-}
-
-if check_url http://127.0.0.1:3210/healthz; then
-  remember_last_good
-else
-  /usr/bin/systemctl --user restart $MCP_SERVICE_NAME
-  /usr/bin/sleep 1
-  if ! check_url http://127.0.0.1:3210/healthz; then
-    if restore_last_good; then
-      /usr/bin/systemctl --user restart $MCP_SERVICE_NAME
-      /usr/bin/sleep 1
-      check_url http://127.0.0.1:3210/healthz || exit 1
-      remember_last_good
-    else
-      exit 1
-    fi
-  else
-    remember_last_good
-  fi
-fi
-
-check_url http://$HEALTH_ADDR/readyz || /usr/bin/systemctl --user restart $TUNNEL_SERVICE_NAME
-WATCHDOG
-  chmod 700 "$watchdog_script"
-
-  cat > "$SYSTEMD_DIR/$WATCHDOG_SERVICE_NAME" <<SERVICE
-[Unit]
-Description=Health watchdog for chatgpt-mcp tunnel ($PROFILE_NAME)
-After=$MCP_SERVICE_NAME $TUNNEL_SERVICE_NAME
-
-[Service]
-Type=oneshot
-ExecStart=$watchdog_script
-SERVICE
-
-  cat > "$SYSTEMD_DIR/$WATCHDOG_TIMER_NAME" <<TIMER
-[Unit]
-Description=Run chatgpt-mcp tunnel watchdog ($PROFILE_NAME)
-
-[Timer]
-OnBootSec=20s
-OnUnitActiveSec=15s
-AccuracySec=1s
-Unit=$WATCHDOG_SERVICE_NAME
-
-[Install]
-WantedBy=timers.target
-TIMER
+  python3 "$REPO/scripts/install-recovery.py" --runtime "$REPO" --profile "$PROFILE_NAME" --health-url "http://$HEALTH_ADDR"
 }
 
 legacy_service_is_this_profile() {
@@ -474,8 +329,19 @@ wait_for_http_backend() {
 
 wait_for_tunnel_ready() {
   local attempt
-  for attempt in {1..20}; do
-    if curl -fsS --max-time 2 "http://$HEALTH_ADDR/readyz" >/dev/null 2>&1; then return 0; fi
+  for attempt in {1..90}; do
+    if curl -fsS --max-time 2 "http://$HEALTH_ADDR/readyz" >/dev/null 2>&1 && \
+       python3 - "$HEALTH_ADDR" <<'POLL'
+import sys, time, urllib.request, re
+try:
+    text = urllib.request.urlopen('http://' + sys.argv[1] + '/metrics', timeout=2).read().decode()
+    match = re.search(r'^commands_poll_last_successful_timestamp_seconds(?:\{[^\n]*\})?\s+([0-9.eE+-]+)', text, re.M)
+    age = time.time() - float(match.group(1)) if match else 999999
+    sys.exit(0 if -5 <= age <= 60 else 1)
+except Exception:
+    sys.exit(1)
+POLL
+    then return 0; fi
     sleep 0.25
   done
   journalctl --user -u "$TUNNEL_SERVICE_NAME" -n 80 --no-pager >&2 || true
@@ -513,13 +379,12 @@ main() {
 
   say "Installing dependencies and running the full gate with pnpm $PNPM_VERSION"
   cd "$REPO"
-  "${PNPM_CMD[@]}" install --no-frozen-lockfile
+  "${PNPM_CMD[@]}" install --frozen-lockfile
   "${PNPM_CMD[@]}" gate
 
-  say "Writing broad local capability configuration"
+  say "Preserving existing capability configuration (initializing only on first install)"
   [[ -f "$FULL_CONFIG" ]] || die "Missing $FULL_CONFIG"
-  [[ ! -f "$LOCAL_CONFIG" ]] || cp -p "$LOCAL_CONFIG" "$SECRETS_DIR/config.local.json.backup.$(date +%Y%m%d-%H%M%S)"
-  cp "$FULL_CONFIG" "$LOCAL_CONFIG"
+  if [[ ! -f "$LOCAL_CONFIG" ]]; then cp "$FULL_CONFIG" "$LOCAL_CONFIG"; fi
   chmod 600 "$LOCAL_CONFIG"
   install_desktop_packages
 
@@ -528,7 +393,8 @@ main() {
 
   say "Creating tunnel-client profile '$PROFILE_NAME'"
   mkdir -p "$PROFILE_DIR"; chmod 700 "$PROFILE_DIR"
-  [[ ! -f "$PROFILE_FILE" ]] || mv "$PROFILE_FILE" "$PROFILE_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+  # An update must not replace existing per-account transport/auth settings.
+  if [[ ! -f "$PROFILE_FILE" ]]; then
   export TUNNEL_CLIENT_PROFILE_DIR="$PROFILE_DIR"
   "$TUNNEL_CLIENT" init \
     --sample sample_mcp_remote_no_auth \
@@ -536,6 +402,7 @@ main() {
     --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
     --health-listen-addr "$HEALTH_ADDR" \
     --mcp-server-url "http://127.0.0.1:3210/mcp"
+  fi
 
   say "Installing persistent systemd user services"
   write_launchers

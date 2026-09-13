@@ -1,3 +1,4 @@
+import { replaceUtf8 } from '../execution/atomic-file.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
@@ -8,7 +9,7 @@ import { adapterError, isComputerAdapterError } from '../errors.js';
 import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
 import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
-import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
 import type {
   ApplicationLaunchResult,
   ComputerAdapter,
@@ -23,6 +24,7 @@ import type {
   ScreenRecordingStopResult,
   ServiceAction,
   ServiceStatus,
+  ShellExecutionClass,
   SystemInfo,
 } from './computer-adapter.js';
 
@@ -203,6 +205,21 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
+  async replaceFile(requestedPath: string, content: string, expectedSha256: string | null): Promise<{ sha256: string }> {
+    const operation = 'fs.replace';
+    requireCapability(this.config.filesystem.write && this.config.filesystem.read, operation, 'Atomic replacement requires filesystem read and write grants.');
+    if (Buffer.byteLength(content, 'utf8') > this.config.filesystem.maxWriteBytes) throw adapterError('OUTPUT_LIMIT', operation, 'Replacement exceeds the write byte limit.');
+    try {
+      const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
+      return await replaceUtf8(path, content, expectedSha256, this.config.filesystem.maxReadBytes, async temporary => {
+        await authorizePath(temporary, this.config.filesystem.roots, operation);
+        await authorizePathEntryCreation(temporary, this.config.filesystem.blocklist, operation);
+      });
+    } catch (error) { return mapOsError(error, operation, { path: requestedPath }); }
+  }
+
   async makeDirectory(requestedPath: string, recursive: boolean): Promise<void> {
     const operation = 'fs.mkdir';
     requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
@@ -247,6 +264,12 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
+  classifyExec(request: ExecRequest): ShellExecutionClass {
+    const defaultRuntimeMs = this.config.shell.defaultRuntimeMs ?? Math.min(30_000, this.config.shell.maxRuntimeMs);
+    const runtimeMs = effectiveShellRuntime(request.timeoutMs, defaultRuntimeMs, this.config.shell.maxRuntimeMs);
+    return runtimeMs > defaultRuntimeMs ? 'shell-local-long' : 'shell-local';
+  }
+
   async exec(request: ExecRequest): Promise<ExecResult> {
     const operation = 'shell.exec';
     authorizeCommand(request.command, request.args, this.config.shell);
@@ -263,7 +286,11 @@ export class LocalComputerAdapter implements ComputerAdapter {
     const options = {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
-      timeoutMs: clampRuntime(request.timeoutMs, this.config.shell.maxRuntimeMs),
+      timeoutMs: effectiveShellRuntime(
+        request.timeoutMs,
+        this.config.shell.defaultRuntimeMs ?? Math.min(30_000, this.config.shell.maxRuntimeMs),
+        this.config.shell.maxRuntimeMs,
+      ),
       maxOutputBytes: this.config.shell.maxOutputBytes,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       operation,

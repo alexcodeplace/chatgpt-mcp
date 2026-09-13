@@ -10,3 +10,6 @@ chatgpt-mcp-activation/
 chatgpt-mcp-activation.zip
 *.service.local
 *.activation
+
+__pycache__/
+*.pyc

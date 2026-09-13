@@ -18,6 +18,12 @@ ChatGPT chooses which tool to call. `chatgpt-mcp` validates the call against the
 
 Architecture: [`SPEC.md`](./SPEC.md). Detailed ChatGPT/tunnel guide: [`docs/CHATGPT.md`](./docs/CHATGPT.md).
 
+## Reliability updates and existing installations
+
+For an existing installation, use the identified blue/green release workflow in [Reliability operation](docs/RELIABILITY.md), not an in-place reinstall. The initial installer preserves configuration and pins tunnel-client 0.0.14. The upgrade path additionally verifies an immutable runtime, tests a candidate, coordinates recovery, switches tunnels with rollback protection, and leaves the previous backend's active work untouched.
+
+Long operations can use opt-in durable `exec.start/status/output/cancel/list` tools. `fs.replace` provides atomic expected-hash file replacement without changing legacy `fs.write` semantics. `system.info.runtime` identifies the actual running release and configuration. [Desktop-agent update instructions](docs/DESKTOP-UPDATE.md) cover local Linux/systemd rollout when the desktop connector is unreachable.
+
 ## Capabilities
 
 Every family except `system.info` is opt-in. Disabled capability families are omitted from MCP tool discovery where practical. Desktop-facing capabilities also require the master `desktop.hostDisplayAccess` grant.
@@ -240,6 +246,7 @@ git clone https://github.com/alexcodeplace/chatgpt-mcp.git
 cd chatgpt-mcp
 corepack pnpm@11.20.0 install
 corepack pnpm@11.20.0 gate
+python3 -m unittest discover -s test -p '*_test.py' -v
 ```
 
 `pnpm gate` runs type checking, behavioral tests, and the TypeScript build.
@@ -295,9 +302,11 @@ HTTP remains stateless. A non-loopback bind is rejected unless allowed hosts are
 
 ### Concurrency and overload protection
 
-The HTTP backend uses one process-wide admission controller shared by every stateless MCP request. The default policy allows 48 active tool operations, reserves 8 slots for control/observability work, limits `shell.exec` to 8 active commands, and bounds the waiting queue at 64 requests for at most 30 seconds. When the queue is full or a queue wait expires, the tool returns `OVERLOADED` locally instead of allowing resource growth to destabilize the backend or tunnel. MCP cancellation removes queued work; cancellation, timeout, and output-limit termination for `shell.exec` kill the complete POSIX process group.
+The HTTP backend uses one process-wide admission controller shared by every stateless MCP request. The default policy allows 48 active tool operations, reserves 8 slots for control/observability work, limits local `shell.exec` to 8 active commands, and bounds the waiting queue at 64 requests for at most 30 seconds. Two local shell slots are reserved for short interactive work whenever the local shell pool is large enough, so explicitly long-running commands cannot monopolize every shell slot. When the queue is full or a queue wait expires, the tool returns `OVERLOADED` locally instead of allowing resource growth to destabilize the backend or tunnel. MCP cancellation removes queued work; cancellation, timeout, and output-limit termination for `shell.exec` kill the complete POSIX process group.
 
-The defaults can be changed through the `concurrency` object in the JSON configuration. Keep `reservedControlSlots < maxConcurrent` and `shellMaxConcurrent <= maxConcurrent - reservedControlSlots`.
+A shell call without `timeoutMs` uses `shell.defaultRuntimeMs` (30 seconds by default, capped by `shell.maxRuntimeMs`). A caller that explicitly requests more than the short default is admitted as long-running local shell work. `concurrency.reservedInteractiveShellSlots` keeps capacity available for short calls while long work is active; its default is 2 when `shellMaxConcurrent` permits it. This makes commands such as a multi-minute `kubectl wait` opt in to the long-running pool instead of silently occupying an interactive slot for the full shell maximum.
+
+The defaults can be changed through the `concurrency` object in the JSON configuration. Keep `reservedControlSlots < maxConcurrent`, `shellMaxConcurrent <= maxConcurrent - reservedControlSlots`, and `reservedInteractiveShellSlots < shellMaxConcurrent`.
 
 ### Optional Kubernetes execution
 
@@ -309,7 +318,7 @@ All deployment details are configuration, including the Kubernetes client comman
 
 Remote execution requires an explicit `cwd`. The authorized working directory is copied as a bounded tar snapshot into an isolated pod workspace; generated changes are not synchronized back. This makes remote execution appropriate for builds, tests, analysis, and other disposable compute, not for commands intended to mutate the authoritative workstation tree. Explicit `localOnlyCommands` always win over remote routing and unknown commands remain local.
 
-Local and remote shell execution have distinct admission pools. `concurrency.shellMaxConcurrent` controls local shell concurrency; `execution.kubernetes.maxConcurrent` controls remote shell concurrency. Both still share the global non-control budget and the reserved control slots. `/metrics` reports the two pools independently along with routing, output-byte, duration, and Kubernetes lifecycle counters.
+Local and remote shell execution have distinct admission pools. `concurrency.shellMaxConcurrent` controls total local shell concurrency; the long-running local subset is additionally capped at `shellMaxConcurrent - reservedInteractiveShellSlots`. `execution.kubernetes.maxConcurrent` controls remote shell concurrency. All pools still share the global non-control budget and the reserved control slots. `/metrics` reports interactive local, long-running local, and remote shell occupancy separately along with routing, output-byte, duration, and Kubernetes lifecycle counters.
 
 Command output is spooled to bounded temporary files rather than accumulated as unbounded chunk arrays in Node memory. `execution.lightweightTimeoutMs` and `execution.lightweightOutputBytes` provide conservative limits for short helper operations; explicit shell runtime/output limits remain governed by the existing `shell` configuration.
 
@@ -357,9 +366,10 @@ corepack pnpm@11.20.0 typecheck
 corepack pnpm@11.20.0 test
 corepack pnpm@11.20.0 build
 corepack pnpm@11.20.0 gate
+python3 -m unittest discover -s test -p '*_test.py' -v
 ```
 
-GitHub Actions runs the same gate on pushes and pull requests and syntax-checks the installer scripts.
+GitHub Actions runs the same TypeScript gate, Python recovery/deployment fault tests, and installer syntax checks on pushes and pull requests. Dependencies install from the frozen lockfile.
 
 ## Platform limitations
 

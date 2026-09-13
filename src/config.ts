@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as z from 'zod/v4';
@@ -21,8 +23,13 @@ const shellSchema = z.object({
   enabled: z.boolean().default(false),
   allowedCommands: z.array(z.string().min(1)).default([]),
   maxRuntimeMs: z.number().int().positive().max(60 * 60 * 1000).default(120_000),
+  defaultRuntimeMs: z.number().int().positive().max(60 * 60 * 1000).optional(),
   maxOutputBytes: z.number().int().positive().max(64 * 1024 * 1024).default(4 * 1024 * 1024),
   allowEnvironment: z.boolean().default(false),
+}).superRefine((value, ctx) => {
+  if (value.defaultRuntimeMs !== undefined && value.defaultRuntimeMs > value.maxRuntimeMs) {
+    ctx.addIssue({ code: 'custom', path: ['defaultRuntimeMs'], message: 'defaultRuntimeMs must not exceed maxRuntimeMs' });
+  }
 });
 
 const processSchema = z.object({
@@ -188,6 +195,7 @@ const concurrencySchema = z.object({
   maxConcurrent: z.number().int().min(2).max(1024).default(48),
   reservedControlSlots: z.number().int().min(0).max(1023).default(8),
   shellMaxConcurrent: z.number().int().positive().max(1024).default(8),
+  reservedInteractiveShellSlots: z.number().int().min(0).max(1023).optional(),
   maxQueue: z.number().int().positive().max(4096).default(64),
   queueTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
 }).superRefine((value, ctx) => {
@@ -196,6 +204,9 @@ const concurrencySchema = z.object({
   }
   if (value.shellMaxConcurrent > value.maxConcurrent - value.reservedControlSlots) {
     ctx.addIssue({ code: 'custom', path: ['shellMaxConcurrent'], message: 'shellMaxConcurrent must fit inside non-control concurrency capacity' });
+  }
+  if (value.reservedInteractiveShellSlots !== undefined && value.reservedInteractiveShellSlots >= value.shellMaxConcurrent) {
+    ctx.addIssue({ code: 'custom', path: ['reservedInteractiveShellSlots'], message: 'reservedInteractiveShellSlots must be less than shellMaxConcurrent' });
   }
 });
 
@@ -207,7 +218,20 @@ const httpSchema = z.object({
   allowedOrigins: z.array(z.string().min(1)).default([]),
 });
 
+const jobsSchema = z.object({
+  enabled: z.boolean().default(false),
+  directory: z.string().min(1).default(join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'chatgpt-mcp', 'jobs')),
+  launcher: z.enum(['systemd', 'detached']).default('systemd'),
+  maxConcurrent: z.number().int().min(1).max(8).default(2),
+  maxStoredJobs: z.number().int().min(1).max(10000).default(2048),
+  maxStoredOutputBytes: z.number().int().min(1048576).max(1073741824).default(268435456),
+  workerMemoryBytes: z.number().int().min(134217728).max(4294967296).default(1073741824),
+  outputRetentionSeconds: z.number().int().min(60).max(604800).default(86400),
+  retentionSeconds: z.number().int().min(60).max(2592000).default(604800),
+}).refine(value => value.outputRetentionSeconds <= value.retentionSeconds, 'output retention cannot exceed ledger retention');
+
 const configSchema = z.object({
+  jobs: jobsSchema.prefault({}),
   execution: executionSchema.default({ defaultBackend: 'local', lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, localIsolation: { enabled: false, scope: 'user', command: 'systemd-run', managerCommand: 'systemctl', privilegeCommand: 'sudo', privilegeArgs: ['-n'], tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
   concurrency: concurrencySchema.default({ maxConcurrent: 48, reservedControlSlots: 8, shellMaxConcurrent: 8, maxQueue: 64, queueTimeoutMs: 30_000 }),
   http: httpSchema.default({ host: '127.0.0.1', port: 3210, allowedHosts: [], allowedOrigins: [] }),
@@ -258,6 +282,14 @@ function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
       ...config.filesystem,
       roots: config.filesystem.roots.map(root => resolve(root)),
       blocklist: config.filesystem.blocklist.map(rule => ({ ...rule, path: resolve(rule.path) })),
+    },
+    shell: {
+      ...config.shell,
+      defaultRuntimeMs: config.shell.defaultRuntimeMs ?? Math.min(30_000, config.shell.maxRuntimeMs),
+    },
+    concurrency: {
+      ...config.concurrency,
+      reservedInteractiveShellSlots: config.concurrency.reservedInteractiveShellSlots ?? Math.min(2, Math.max(0, config.concurrency.shellMaxConcurrent - 1)),
     },
     browser: {
       ...config.browser,
