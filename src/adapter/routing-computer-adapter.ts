@@ -1,6 +1,6 @@
 import type { ChatGptMcpConfig } from '../config.js';
 import { authorizePath } from '../policy/filesystem.js';
-import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, validateShellEnvironment } from '../policy/shell.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, validateShellEnvironment } from '../policy/shell.js';
 import { KubernetesExecutor } from '../execution/kubernetes-executor.js';
 import { ExecutionMetrics } from '../execution/metrics.js';
 import type { ExecRequest, ExecResult, ShellExecutionClass } from './computer-adapter.js';
@@ -17,13 +17,14 @@ export class RoutingComputerAdapter extends LocalComputerAdapter {
     this.patterns = routingConfig.execution.kubernetes.heavyCommandPatterns.map(pattern => new RegExp(pattern));
   }
 
-  classifyExec(request: ExecRequest): ShellExecutionClass {
+  override classifyExec(request: ExecRequest): ShellExecutionClass {
+    const localClass = super.classifyExec(request);
     const remote = this.routingConfig.execution.kubernetes;
-    if (!remote.enabled || remote.image === undefined || request.cwd === undefined) return 'shell-local';
-    if (remote.localOnlyCommands.includes(request.command)) return 'shell-local';
+    if (!remote.enabled || remote.image === undefined || request.cwd === undefined) return localClass;
+    if (remote.localOnlyCommands.includes(request.command)) return localClass;
     if (remote.remoteCommands.includes(request.command)) return 'shell-remote';
     const invocation = [request.command, ...request.args].join(' ');
-    return this.patterns.some(pattern => pattern.test(invocation)) ? 'shell-remote' : 'shell-local';
+    return this.patterns.some(pattern => pattern.test(invocation)) ? 'shell-remote' : localClass;
   }
 
   override async exec(request: ExecRequest): Promise<ExecResult> {
@@ -53,7 +54,11 @@ export class RoutingComputerAdapter extends LocalComputerAdapter {
       args: request.args,
       cwd,
       ...(env === undefined ? {} : { env: env as Readonly<Record<string, string>> }),
-      timeoutMs: clampRuntime(request.timeoutMs, this.routingConfig.shell.maxRuntimeMs),
+      timeoutMs: effectiveShellRuntime(
+        request.timeoutMs,
+        this.routingConfig.shell.defaultRuntimeMs ?? Math.min(30_000, this.routingConfig.shell.maxRuntimeMs),
+        this.routingConfig.shell.maxRuntimeMs,
+      ),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     }, this.routingConfig.shell.maxRuntimeMs, this.routingConfig.shell.maxOutputBytes);
   }

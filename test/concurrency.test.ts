@@ -80,6 +80,52 @@ test('shell limit does not head-of-line block startable non-shell work', async (
   assert.equal(c.snapshot().peaks.shell, 1);
 });
 
+test('long local shell saturation preserves interactive capacity and does not head-of-line block it', async () => {
+  const c = controller({
+    maxConcurrent: 8,
+    reservedControlSlots: 1,
+    shellMaxConcurrent: 4,
+    reservedInteractiveShellSlots: 1,
+    maxQueue: 8,
+    queueTimeoutMs: 1_000,
+  });
+  const longGates = Array.from({ length: 4 }, () => deferred());
+  const interactiveGate = deferred();
+  const longs = longGates.slice(0, 3).map(gate => c.run('shell.exec', async () => gate.promise, undefined, 'shell-local-long'));
+  const queuedLong = c.run('shell.exec', async () => longGates[3]!.promise, undefined, 'shell-local-long');
+  await tick();
+
+  let snapshot = c.snapshot();
+  assert.equal(snapshot.limits.reservedInteractiveShellSlots, 1);
+  assert.equal(snapshot.limits.longShellMaxConcurrent, 3);
+  assert.equal(snapshot.active.localShellLong, 3);
+  assert.equal(snapshot.queued.localShellLong, 1);
+
+  let interactiveStarted = false;
+  const interactive = c.run('shell.exec', async () => {
+    interactiveStarted = true;
+    await interactiveGate.promise;
+  }, undefined, 'shell-local');
+  await tick();
+  snapshot = c.snapshot();
+  assert.equal(interactiveStarted, true);
+  assert.equal(snapshot.active.localShell, 4);
+  assert.equal(snapshot.active.localShellInteractive, 1);
+  assert.equal(snapshot.active.localShellLong, 3);
+  assert.equal(snapshot.queued.localShellLong, 1);
+
+  longGates[0]!.resolve();
+  await tick();
+  snapshot = c.snapshot();
+  assert.equal(snapshot.active.localShellLong, 3);
+  assert.equal(snapshot.queued.localShellLong, 0);
+
+  interactiveGate.resolve();
+  for (const gate of longGates.slice(1)) gate.resolve();
+  await Promise.all([...longs, queuedLong, interactive]);
+  assert.equal(c.snapshot().active.localShell, 0);
+});
+
 test('full queue rejects immediately with OVERLOADED and never exceeds bounds', async () => {
   const c = controller({ maxConcurrent: 2, reservedControlSlots: 1, shellMaxConcurrent: 1, maxQueue: 2, queueTimeoutMs: 1_000 });
   const running = deferred();

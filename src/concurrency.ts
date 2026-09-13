@@ -1,7 +1,7 @@
 import type { ChatGptMcpConfig } from './config.js';
 import { adapterError } from './errors.js';
 
-export type AdmissionClass = 'control' | 'normal' | 'shell-local' | 'shell-remote';
+export type AdmissionClass = 'control' | 'normal' | 'shell-local' | 'shell-local-long' | 'shell-remote';
 
 const CONTROL_OPERATIONS = new Set([
   'system.info',
@@ -29,12 +29,14 @@ export interface ConcurrencySnapshot {
     maxNonControlConcurrent: number;
     reservedControlSlots: number;
     shellMaxConcurrent: number;
+    reservedInteractiveShellSlots: number;
+    longShellMaxConcurrent: number;
     remoteShellMaxConcurrent: number;
     maxQueue: number;
     queueTimeoutMs: number;
   };
-  active: { total: number; control: number; nonControl: number; shell: number; localShell: number; remoteShell: number };
-  queued: { total: number; control: number; regular: number; localShell: number; remoteShell: number };
+  active: { total: number; control: number; nonControl: number; shell: number; localShell: number; localShellInteractive: number; localShellLong: number; remoteShell: number };
+  queued: { total: number; control: number; regular: number; localShell: number; localShellInteractive: number; localShellLong: number; remoteShell: number };
   peaks: { active: number; shell: number; localShell: number; remoteShell: number; queued: number };
   counters: {
     submitted: number;
@@ -58,6 +60,7 @@ export class ConcurrencyController {
   private activeControl = 0;
   private activeNonControl = 0;
   private activeShellLocal = 0;
+  private activeShellLocalLong = 0;
   private activeShellRemote = 0;
   private readonly controlQueue: QueueEntry[] = [];
   private readonly regularQueue: QueueEntry[] = [];
@@ -144,12 +147,31 @@ export class ConcurrencyController {
         maxNonControlConcurrent: this.maxNonControlConcurrent(),
         reservedControlSlots: this.config.reservedControlSlots,
         shellMaxConcurrent: this.config.shellMaxConcurrent,
+        reservedInteractiveShellSlots: this.reservedInteractiveShellSlots(),
+        longShellMaxConcurrent: this.longShellMaxConcurrent(),
         remoteShellMaxConcurrent: this.remoteShellMaxConcurrent,
         maxQueue: this.config.maxQueue,
         queueTimeoutMs: this.config.queueTimeoutMs,
       },
-      active: { total: this.active, control: this.activeControl, nonControl: this.activeNonControl, shell: this.activeShellLocal + this.activeShellRemote, localShell: this.activeShellLocal, remoteShell: this.activeShellRemote },
-      queued: { total: queued, control: this.controlQueue.length, regular: this.regularQueue.length, localShell: this.regularQueue.filter(entry => entry.kind === 'shell-local').length, remoteShell: this.regularQueue.filter(entry => entry.kind === 'shell-remote').length },
+      active: {
+        total: this.active,
+        control: this.activeControl,
+        nonControl: this.activeNonControl,
+        shell: this.activeShellLocal + this.activeShellRemote,
+        localShell: this.activeShellLocal,
+        localShellInteractive: this.activeShellLocal - this.activeShellLocalLong,
+        localShellLong: this.activeShellLocalLong,
+        remoteShell: this.activeShellRemote,
+      },
+      queued: {
+        total: queued,
+        control: this.controlQueue.length,
+        regular: this.regularQueue.length,
+        localShell: this.regularQueue.filter(entry => entry.kind === 'shell-local' || entry.kind === 'shell-local-long').length,
+        localShellInteractive: this.regularQueue.filter(entry => entry.kind === 'shell-local').length,
+        localShellLong: this.regularQueue.filter(entry => entry.kind === 'shell-local-long').length,
+        remoteShell: this.regularQueue.filter(entry => entry.kind === 'shell-remote').length,
+      },
       peaks: { active: this.peakActive, shell: this.peakShell, localShell: this.peakShellLocal, remoteShell: this.peakShellRemote, queued: this.peakQueued },
       counters: {
         submitted: this.submitted,
@@ -167,6 +189,14 @@ export class ConcurrencyController {
     return this.config.maxConcurrent - this.config.reservedControlSlots;
   }
 
+  private reservedInteractiveShellSlots(): number {
+    return this.config.reservedInteractiveShellSlots ?? Math.min(2, Math.max(0, this.config.shellMaxConcurrent - 1));
+  }
+
+  private longShellMaxConcurrent(): number {
+    return this.config.shellMaxConcurrent - this.reservedInteractiveShellSlots();
+  }
+
   private queuedTotal(): number {
     return this.controlQueue.length + this.regularQueue.length;
   }
@@ -175,7 +205,8 @@ export class ConcurrencyController {
     if (this.active >= this.config.maxConcurrent) return false;
     if (kind === 'control') return true;
     if (this.activeNonControl >= this.maxNonControlConcurrent()) return false;
-    if (kind === 'shell-local' && this.activeShellLocal >= this.config.shellMaxConcurrent) return false;
+    if ((kind === 'shell-local' || kind === 'shell-local-long') && this.activeShellLocal >= this.config.shellMaxConcurrent) return false;
+    if (kind === 'shell-local-long' && this.activeShellLocalLong >= this.longShellMaxConcurrent()) return false;
     if (kind === 'shell-remote' && this.activeShellRemote >= this.remoteShellMaxConcurrent) return false;
     return true;
   }
@@ -186,10 +217,12 @@ export class ConcurrencyController {
       active: snapshot.active.total,
       activeShell: snapshot.active.shell,
       activeLocalShell: snapshot.active.localShell,
+      activeLongLocalShell: snapshot.active.localShellLong,
       activeRemoteShell: snapshot.active.remoteShell,
       queued: snapshot.queued.total,
       maxConcurrent: snapshot.limits.maxConcurrent,
       shellMaxConcurrent: snapshot.limits.shellMaxConcurrent,
+      longShellMaxConcurrent: snapshot.limits.longShellMaxConcurrent,
       remoteShellMaxConcurrent: snapshot.limits.remoteShellMaxConcurrent,
       maxQueue: snapshot.limits.maxQueue,
     });
@@ -231,7 +264,8 @@ export class ConcurrencyController {
     this.active += 1;
     if (kind === 'control') this.activeControl += 1;
     else this.activeNonControl += 1;
-    if (kind === 'shell-local') this.activeShellLocal += 1;
+    if (kind === 'shell-local' || kind === 'shell-local-long') this.activeShellLocal += 1;
+    if (kind === 'shell-local-long') this.activeShellLocalLong += 1;
     if (kind === 'shell-remote') this.activeShellRemote += 1;
     this.started += 1;
     this.peakActive = Math.max(this.peakActive, this.active);
@@ -255,7 +289,8 @@ export class ConcurrencyController {
       this.active -= 1;
       if (kind === 'control') this.activeControl -= 1;
       else this.activeNonControl -= 1;
-      if (kind === 'shell-local') this.activeShellLocal -= 1;
+      if (kind === 'shell-local' || kind === 'shell-local-long') this.activeShellLocal -= 1;
+      if (kind === 'shell-local-long') this.activeShellLocalLong -= 1;
       if (kind === 'shell-remote') this.activeShellRemote -= 1;
       this.completed += 1;
       this.drain();

@@ -295,6 +295,10 @@ export function clampRuntime(requested: number | undefined, maximum: number): nu
   return Math.max(1, Math.min(requested, maximum));
 }
 
+export function effectiveShellRuntime(requested: number | undefined, defaultRuntime: number, maximum: number): number {
+  return clampRuntime(requested ?? defaultRuntime, maximum);
+}
+
 export function clampOutput(requested: number | undefined, maximum: number): number {
   if (requested === undefined) return maximum;
   return Math.max(1, Math.min(requested, maximum));

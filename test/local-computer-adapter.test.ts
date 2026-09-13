@@ -237,6 +237,24 @@ test('shell timeout terminates the child and reports timedOut', async () => {
   }
 });
 
+test('shell commands without an explicit timeout use the bounded short default', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-default-timeout-'));
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { roots: [root] },
+    shell: { enabled: true, allowedCommands: ['node'], maxRuntimeMs: 1_000, defaultRuntimeMs: 50, maxOutputBytes: 4096 },
+  }));
+  try {
+    const implicit = await adapter.exec({ command: 'node', args: ['-e', 'setTimeout(() => {}, 500)'], cwd: root });
+    assert.equal(implicit.timedOut, true);
+
+    const explicit = await adapter.exec({ command: 'node', args: ['-e', 'setTimeout(() => {}, 20)'], cwd: root, timeoutMs: 500 });
+    assert.equal(explicit.timedOut, false);
+    assert.equal(explicit.exitCode, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('shell output limit terminates execution with OUTPUT_LIMIT', async () => {
   const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-output-'));
   const adapter = new LocalComputerAdapter(parseConfig({
