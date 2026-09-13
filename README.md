@@ -314,6 +314,36 @@ The defaults can be changed through the `concurrency` object in the JSON configu
 
 The backend is opt-in: `execution.kubernetes.enabled` defaults to `false`, `execution.defaultBackend` is `local`, and an empty `remoteCommands`/`heavyCommandPatterns` set routes nothing remotely. With Kubernetes disabled, startup does not invoke or probe `kubectl`; existing configuration files remain local-only.
 
+#### Generic command policies
+
+`execution.commandPolicies` is an ordered, backend-neutral policy layer for commands submitted through MCP. Rules are evaluated before executable resolution for both `shell.exec` and durable `exec.start`; the first matching rule wins. A rule can match the raw `command`, the request `cwd`, and/or a canonical `invocation`. Each matcher is a JavaScript regular-expression string. The canonical invocation is `JSON.stringify([command, ...args])`, so argument boundaries are deterministic even when an argument contains whitespace or shell punctuation.
+
+Actions are `allow`, `route`, and `deny`. `allow` forces normal local execution and stops legacy routing. `route` selects either `local` or `kubernetes`; an explicit Kubernetes route is fail-closed if that backend is disabled, has no image, or (for `shell.exec`) the request has no explicit `cwd`. `deny` returns `COMMAND_NOT_ALLOWED` with the configured message and the matching `ruleId`. No deployment-specific command names, cluster conventions, or blocker text are compiled into the package.
+
+```json
+{
+  "execution": {
+    "commandPolicies": [
+      {
+        "id": "remote-analysis",
+        "match": { "invocation": "(?:typecheck|lint|test)" },
+        "action": { "type": "route", "backend": "kubernetes" }
+      },
+      {
+        "id": "block-local-watchers",
+        "match": { "invocation": "(?:--watch|dev|serve)" },
+        "action": {
+          "type": "deny",
+          "message": "This workload is disabled on this host. Use the configured remote runner instead."
+        }
+      }
+    ]
+  }
+}
+```
+
+If no command policy matches, the existing `localOnlyCommands`, `remoteCommands`, and `heavyCommandPatterns` behavior is preserved for backward compatibility. Policies see the MCP request itself; they cannot retroactively inspect arbitrary grandchildren hidden behind an allowed wrapper, so deployments that permit opaque wrapper commands should match those wrappers or add a host-side execution backstop.
+
 All deployment details are configuration, including the Kubernetes client command/arguments, kubeconfig/context, namespace, executor image and pull policy/secrets, service account, remote/local-only routing rules, remote concurrency, workspace path/excludes/archive limit, resource requests/limits, node selectors, tolerations, labels/annotations, volumes/mounts, startup/cleanup limits, required commands/environment, and optional executable-version checks. Keep installation-specific values such as private registry names, cluster contexts, Tailscale addresses, and node labels in an untracked/private `config.local.json`, not in public defaults.
 
 Remote execution requires an explicit `cwd`. The authorized working directory is copied as a bounded tar snapshot into an isolated pod workspace; generated changes are not synchronized back. This makes remote execution appropriate for builds, tests, analysis, and other disposable compute, not for commands intended to mutate the authoritative workstation tree. Explicit `localOnlyCommands` always win over remote routing and unknown commands remain local.

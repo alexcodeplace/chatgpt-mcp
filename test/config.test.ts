@@ -152,6 +152,26 @@ test('Kubernetes execution is strictly opt-in and local-only by default', () => 
   assert.equal(config.execution.kubernetes.localOnlyCommands.length, 0);
 });
 
+test('command policies validate ordered regex rules and custom denial messages', () => {
+  const config = parseConfig({
+    execution: {
+      commandPolicies: [
+        { id: 'allow-unit', match: { invocation: 'test:unit' }, action: { type: 'allow' } },
+        { id: 'remote-tests', match: { command: 'pnpm$', cwd: '/repo' }, action: { type: 'route', backend: 'kubernetes' } },
+        { id: 'deny-watch', match: { invocation: '--watch' }, action: { type: 'deny', message: 'Use a remote runner.' } },
+      ],
+    },
+  });
+  assert.equal(config.execution.commandPolicies.length, 3);
+  assert.equal(config.execution.commandPolicies[2]?.action.type, 'deny');
+  assert.throws(() => parseConfig({ execution: { commandPolicies: [{ id: 'bad-regex', match: { invocation: '[bad' }, action: { type: 'allow' } }] } }), /valid regular expression/);
+  assert.throws(() => parseConfig({ execution: { commandPolicies: [{ id: 'empty-match', match: {}, action: { type: 'allow' } }] } }), /at least one match field is required/);
+  assert.throws(() => parseConfig({ execution: { commandPolicies: [
+    { id: 'duplicate', match: { command: 'node' }, action: { type: 'allow' } },
+    { id: 'duplicate', match: { command: 'pnpm' }, action: { type: 'allow' } },
+  ] } }), /policy ids must be unique/);
+});
+
 test('Kubernetes execution requires an image only when explicitly enabled', () => {
   assert.doesNotThrow(() => parseConfig({ execution: { kubernetes: { enabled: false } } }));
   assert.throws(

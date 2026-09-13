@@ -9,6 +9,7 @@ import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError } from '../errors.js';
 import { authorizePath, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
 import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, validateShellEnvironment } from '../policy/shell.js';
+import { compileCommandPolicies, enforceCommandPolicy, evaluateCommandPolicy } from '../policy/command-policy.js';
 import { spawnBounded } from './bounded-process.js';
 
 export type JobState = 'starting' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
@@ -70,7 +71,10 @@ function fingerprint(request: Omit<ExecRequest, 'signal'>): string {
 
 export class JobStore {
   private pending: Promise<unknown> = Promise.resolve();
-  constructor(private readonly config: Readonly<ChatGptMcpConfig>, private readonly launcher?: JobLauncher) {}
+  private readonly commandPolicies: ReturnType<typeof compileCommandPolicies>;
+  constructor(private readonly config: Readonly<ChatGptMcpConfig>, private readonly launcher?: JobLauncher) {
+    this.commandPolicies = compileCommandPolicies(config.execution.commandPolicies);
+  }
   get directory(): string { return this.config.jobs.directory; }
 
   private path(jobId: string): string {
@@ -117,6 +121,11 @@ export class JobStore {
       authorizeCommand(supplied.command, supplied.args, this.config.shell);
       authorizeHostDisplaySafeInvocation(supplied.command, supplied.args, this.config.desktop.hostDisplayAccess);
       const cwd = await authorizePath(supplied.cwd ?? process.cwd(), this.config.filesystem.roots, 'exec.start');
+      const policy = evaluateCommandPolicy(this.commandPolicies, { command: supplied.command, args: supplied.args, cwd });
+      enforceCommandPolicy(policy, 'exec.start');
+      if (policy?.action.type === 'route' && policy.action.backend === 'kubernetes' && (!this.config.execution.kubernetes.enabled || this.config.execution.kubernetes.image === undefined)) {
+        throw adapterError('CAPABILITY_DISABLED', 'exec.start', 'Command policy requires the Kubernetes execution backend, but it is not configured.', { ruleId: policy.ruleId, backend: 'kubernetes' });
+      }
       await authorizeShellFilesystemMutation(supplied.command, supplied.args, cwd, this.config.filesystem.blocklist, 'exec.start');
       validateShellEnvironment(supplied.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
       const timeoutMs = effectiveShellRuntime(supplied.timeoutMs, this.config.shell.defaultRuntimeMs ?? 30_000, this.config.shell.maxRuntimeMs);
