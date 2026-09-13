@@ -71,7 +71,7 @@ def rollback(plan_path):
         if plan.get('committed') or plan.get('rolledBack'):
             return
         for profile in set(plan.get('newProfiles', [])) & set(plan.get('touchedProfiles', [])):
-            systemctl('disable', '--now', f'chatgpt-mcp-tunnel-{profile}.service', check=False)
+            systemctl('disable', '--now', tunnel_unit(plan, profile), check=False)
         for item in reversed(plan['files']):
             target = pathlib.Path(item['path'])
             if item['backup'] is None:
@@ -82,7 +82,7 @@ def rollback(plan_path):
         for profile in plan.get('touchedProfiles', []):
             if profile in plan.get('newProfiles', []):
                 continue
-            systemctl('restart', f'chatgpt-mcp-tunnel-{profile}.service', check=False)
+            systemctl('restart', tunnel_unit(plan, profile), check=False)
         for timer in plan.get('enabledLegacyTimers', []):
             systemctl('enable', '--now', timer, check=False)
         if plan.get('previousBackendWasEnabled'):
@@ -96,6 +96,30 @@ def rollback(plan_path):
         plan['rolledBack'] = True
         atomic_json(plan_path, plan)
         print(json.dumps({'status': 'rolled_back', 'plan': str(plan_path)}), flush=True)
+
+
+def validate_service_name(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@:-]*\.service', value) or '..' in value:
+        raise ValueError('unit mapping must name one user service, not a path or systemd option')
+    return value
+
+
+def profile_units(profiles, overrides):
+    mappings = {profile['name']: f"chatgpt-mcp-tunnel-{profile['name']}.service" for profile in profiles}
+    seen = set()
+    for value in overrides or []:
+        name, separator, unit = value.partition('=')
+        if not separator or name not in mappings or name in seen:
+            raise ValueError('profile-unit mapping must name each selected profile at most once')
+        seen.add(name)
+        mappings[name] = validate_service_name(unit)
+    if len(set(mappings.values())) != len(mappings):
+        raise ValueError('different profiles cannot own the same tunnel service')
+    return mappings
+
+
+def tunnel_unit(plan, profile):
+    return validate_service_name(plan.get('tunnelUnits', {}).get(profile, f'chatgpt-mcp-tunnel-{profile}.service'))
 
 
 def free_port():
@@ -321,6 +345,9 @@ def deploy(args):
         if not health:
             raise ValueError('profile must expose an explicit loopback health port')
         profiles.append({'name': name, 'key': str(key_path), 'path': str(profile_path), 'healthUrl': 'http://' + health.group(1), 'original': text})
+    mappings = profile_units(profiles, getattr(args, 'profile_unit', None))
+    if bootstrap and getattr(args, 'profile_unit', None):
+        raise ValueError('existing service mappings cannot be used for bootstrap')
     state = home / '.local/state/chatgpt-mcp'
     directory = state / 'deployments' / (revision[:12] + '-' + uuid.uuid4().hex[:8])
     directory.mkdir(parents=True, mode=0o700)
@@ -330,6 +357,10 @@ def deploy(args):
     previous_unit = 'chatgpt-mcp.service'
     if recovery_config.exists():
         previous_unit = json.loads(recovery_config.read_text()).get('backendUnit', previous_unit)
+    if getattr(args, 'previous_backend_unit', None):
+        previous_unit = validate_service_name(args.previous_backend_unit)
+    if previous_unit in mappings.values():
+        raise ValueError('backend and tunnel services must be distinct')
     config = json.loads(args.config.read_text())
     cwd = working_directory(args.config, previous_unit, getattr(args, 'working_directory', None))
     port = free_port()
@@ -392,7 +423,7 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
     plan = {'directory': str(directory), 'lockPath': str(lock_path), 'backendUnit': unit, 'revision': revision, 'files': [], 'touchedProfiles': [], 'enabledLegacyTimers': [],
             'previousBackendUnit': None if bootstrap else previous_unit, 'previousBackendWasEnabled': False if bootstrap else systemctl('is-enabled', previous_unit, check=False).returncode == 0,
             'recoveryWasEnabled': systemctl('is-enabled', 'chatgpt-mcp-recovery.timer', check=False).returncode == 0,
-            'newProfiles': [p['name'] for p in profiles] if bootstrap else []}
+            'newProfiles': [p['name'] for p in profiles] if bootstrap else [], 'tunnelUnits': mappings}
     plan_path = directory / 'plan.json'
     atomic_json(plan_path, plan)
     guard = 'chatgpt-mcp-rollback-' + revision[:12]
@@ -415,7 +446,8 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
             for profile in profiles:
                 name = profile['name']
                 path = pathlib.Path(profile['path'])
-                base_unit = units / f'chatgpt-mcp-tunnel-{name}.service'
+                selected_unit = mappings[name]
+                base_unit = units / selected_unit
                 if bootstrap:
                     if path.exists() or path.is_symlink() or base_unit.exists() or base_unit.is_symlink():
                         raise RuntimeError('bootstrap target appeared during staging; refusing to overwrite it')
@@ -441,7 +473,7 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
                         rewritten.append(line)
                 backup(plan, path)
                 backup(plan, base_unit)
-                dropin = units / f'chatgpt-mcp-tunnel-{name}.service.d/60-reliability.conf'
+                dropin = units / (selected_unit + '.d/60-reliability.conf')
                 backup(plan, dropin)
                 plan['touchedProfiles'].append(name)
                 atomic_json(plan_path, plan)
@@ -465,11 +497,11 @@ RestartPreventExitStatus=78
 TimeoutStopSec=10
 ''', 0o644)
                 systemctl('daemon-reload')
-                systemctl('reset-failed', f'chatgpt-mcp-tunnel-{name}.service', check=False)
-                systemctl('restart', f'chatgpt-mcp-tunnel-{name}.service')
+                systemctl('reset-failed', selected_unit, check=False)
+                systemctl('restart', selected_unit)
                 age = wait_poll(profile['healthUrl'])
                 if bootstrap:
-                    systemctl('enable', f'chatgpt-mcp-tunnel-{name}.service')
+                    systemctl('enable', selected_unit)
                 print(json.dumps({'profile': name, 'pollAgeSeconds': age, 'status': 'fresh_poll_after_upgrade'}), flush=True)
             for target in [recovery_config, library / 'recovery.py', units / 'chatgpt-mcp-recovery.service', units / 'chatgpt-mcp-recovery.timer', home / '.config/chatgpt-mcp/active.json']:
                 backup(plan, target)
@@ -477,6 +509,9 @@ TimeoutStopSec=10
                 run('python3', str(release / 'scripts/install-recovery.py'), '--runtime', str(directory), '--profile', profile['name'], '--health-url', profile['healthUrl'], '--no-enable')
             recovery_settings = json.loads(recovery_config.read_text())
             recovery_settings['backendUnit'] = unit
+            for item in recovery_settings.get('profiles', []):
+                if item['name'] in mappings:
+                    item['unit'] = mappings[item['name']]
             recovery_settings['canaryDirectory'] = settings['canaryDirectory']
             recovery_settings['expectedRuntime'] = {key: results['finalBackend']['runtime'][key] for key in ('release', 'configFingerprint')}
             if config.get('jobs', {}).get('enabled') and config.get('shell', {}).get('enabled'):
@@ -485,7 +520,7 @@ TimeoutStopSec=10
             status, evidence = backend_probe(recovery_settings, canary=True)
             if status != 'HEALTHY':
                 raise RuntimeError('final capability canary failed: ' + status)
-            active = {**settings, 'releaseDirectory': str(release), 'revision': revision, 'previousBackendUnit': None if bootstrap else previous_unit, 'deploymentDirectory': str(directory), 'profiles': [{k: p[k] for k in ['name', 'healthUrl']} for p in profiles]}
+            active = {**settings, 'releaseDirectory': str(release), 'revision': revision, 'previousBackendUnit': None if bootstrap else previous_unit, 'deploymentDirectory': str(directory), 'profiles': [{**{k: p[k] for k in ['name', 'healthUrl']}, 'unit': mappings[p['name']]} for p in profiles]}
             atomic_json(home / '.config/chatgpt-mcp/active.json', active)
             systemctl('daemon-reload')
             systemctl('enable', '--now', 'chatgpt-mcp-recovery.timer')
@@ -511,6 +546,8 @@ if __name__ == '__main__':
     item.add_argument('--config', required=True, type=pathlib.Path)
     item.add_argument('--node', type=pathlib.Path, default=pathlib.Path(shutil.which('node') or '/usr/bin/node'))
     item.add_argument('--profile', action='append', required=True, help='NAME=/absolute/runtime-key-file')
+    item.add_argument('--profile-unit', action='append', help='Existing user tunnel unit mapping: PROFILE=UNIT.service; preserves deployed Overdeck names')
+    item.add_argument('--previous-backend-unit', help='Existing user backend name, when adopting a manager-owned installation')
     item.add_argument('--enable-jobs', action='store_true')
     item.add_argument('--bootstrap', action='store_true', help='Explicit first install only; never replace an existing MCP profile/controller')
     item.add_argument('--tunnel-id-file', type=pathlib.Path, help='Existing, verified desktop activation file; value is never printed')

@@ -141,6 +141,32 @@ class DeploymentTests(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn('path is not absolute', invalid.stderr)
 
+    def test_existing_overdeck_service_mapping_and_rollback(self):
+        profiles = [{'name': 'overdeck-host'}]
+        mapping = deploy.profile_units(profiles, ['overdeck-host=overdeck-mcp-tunnel.service'])
+        self.assertEqual(mapping, {'overdeck-host': 'overdeck-mcp-tunnel.service'})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            plan = {'directory': str(root), 'lockPath': str(root / 'lock'), 'backendUnit': 'candidate.service',
+                    'files': [], 'touchedProfiles': ['overdeck-host'], 'tunnelUnits': mapping,
+                    'previousBackendUnit': 'overdeck-mcp.service', 'previousBackendWasEnabled': True,
+                    'recoveryWasEnabled': False}
+            deploy.atomic_json(root / 'plan.json', plan)
+            with mock.patch.object(deploy, 'systemctl', return_value=mock.Mock(returncode=0)) as systemctl:
+                deploy.rollback(root / 'plan.json')
+            commands = [c.args for c in systemctl.call_args_list]
+            self.assertIn(('restart', 'overdeck-mcp-tunnel.service'), commands)
+            self.assertIn(('enable', 'overdeck-mcp.service'), commands)
+            self.assertNotIn(('restart', 'chatgpt-mcp-tunnel-overdeck-host.service'), commands)
+
+    def test_service_mappings_reject_unknown_duplicate_and_unsafe_units(self):
+        profiles = [{'name': 'host'}, {'name': 'vm'}]
+        for values in [['other=ok.service'], ['host=a.service', 'host=b.service'],
+                       ['host=a.service', 'vm=a.service'], ['host=../../other.service'], ['host=--system.service']]:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                deploy.profile_units(profiles, values)
+        self.assertEqual(deploy.tunnel_unit({}, 'vm'), 'chatgpt-mcp-tunnel-vm.service')
+
     def test_drain_checks_both_worker_and_queue_occupancy(self):
         samples = [
             'dispatcher_worker_pool_occupancy 0\ncommands_queue_length 1\n',
