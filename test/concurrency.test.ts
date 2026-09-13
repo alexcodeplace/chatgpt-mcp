@@ -21,6 +21,18 @@ async function tick(): Promise<void> {
   await new Promise<void>(resolve => setImmediate(resolve));
 }
 
+async function withRefGuard<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`test guard timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, guard]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 test('normal work leaves reserved slots available for control operations', async () => {
   const c = controller({ maxConcurrent: 4, reservedControlSlots: 1, shellMaxConcurrent: 2, maxQueue: 8, queueTimeoutMs: 1_000 });
   const gates = [deferred(), deferred(), deferred(), deferred(), deferred()];
@@ -152,7 +164,8 @@ test('queue timeout returns OVERLOADED and removes the queued request', async ()
   const c = controller({ maxConcurrent: 2, reservedControlSlots: 1, shellMaxConcurrent: 1, maxQueue: 2, queueTimeoutMs: 25 });
   const running = deferred();
   const active = c.run('fs.read.active', async () => running.promise);
-  await assert.rejects(() => c.run('fs.read.waiting', async () => undefined), codeIs('OVERLOADED'));
+  const waiting = c.run('fs.read.waiting', async () => undefined);
+  await assert.rejects(() => withRefGuard(waiting, 250), codeIs('OVERLOADED'));
   assert.equal(c.snapshot().queued.total, 0);
   assert.equal(c.snapshot().counters.timedOut, 1);
   running.resolve();
