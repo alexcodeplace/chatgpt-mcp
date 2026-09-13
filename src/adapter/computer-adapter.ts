@@ -25,7 +25,7 @@ export interface ExecRequest {
   signal?: AbortSignal;
 }
 
-export type ShellExecutionClass = 'shell-local' | 'shell-remote';
+export type ShellExecutionClass = 'shell-local' | 'shell-local-long' | 'shell-remote';
 
 export interface ExecResult {
   exitCode: number | null;

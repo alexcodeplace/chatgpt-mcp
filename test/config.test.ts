@@ -10,6 +10,7 @@ test('safe defaults expose no action capability authority', () => {
   assert.equal(config.concurrency.maxConcurrent, 48);
   assert.equal(config.concurrency.reservedControlSlots, 8);
   assert.equal(config.concurrency.shellMaxConcurrent, 8);
+  assert.equal(config.concurrency.reservedInteractiveShellSlots, 2);
   assert.equal(config.concurrency.maxQueue, 64);
   assert.equal(config.concurrency.queueTimeoutMs, 30_000);
   assert.equal(config.http.host, '127.0.0.1');
@@ -21,6 +22,7 @@ test('safe defaults expose no action capability authority', () => {
   assert.deepEqual(config.filesystem.roots, []);
   assert.deepEqual(config.filesystem.blocklist, []);
   assert.equal(config.shell.enabled, false);
+  assert.equal(config.shell.defaultRuntimeMs, 30_000);
   assert.deepEqual(config.shell.allowedCommands, []);
   assert.equal(config.process.list, false);
   assert.equal(config.process.kill, false);
@@ -105,6 +107,17 @@ test('malformed configuration fails closed', () => {
   assert.throws(() => parseConfig({ application: { maxTracked: 0 } }));
   assert.throws(() => parseConfig({ concurrency: { maxConcurrent: 8, reservedControlSlots: 8 } }));
   assert.throws(() => parseConfig({ concurrency: { maxConcurrent: 8, reservedControlSlots: 2, shellMaxConcurrent: 7 } }));
+  assert.throws(() => parseConfig({ concurrency: { maxConcurrent: 8, reservedControlSlots: 2, shellMaxConcurrent: 4, reservedInteractiveShellSlots: 4 } }));
+  assert.throws(() => parseConfig({ shell: { maxRuntimeMs: 10_000, defaultRuntimeMs: 20_000 } }));
+});
+
+test('shell starvation defaults adapt to deliberately small custom limits', () => {
+  const config = parseConfig({
+    shell: { maxRuntimeMs: 5_000 },
+    concurrency: { shellMaxConcurrent: 1 },
+  });
+  assert.equal(config.shell.defaultRuntimeMs, 5_000);
+  assert.equal(config.concurrency.reservedInteractiveShellSlots, 0);
 });
 
 
