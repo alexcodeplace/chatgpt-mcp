@@ -117,6 +117,10 @@ export async function spawnBounded(command: string, args: readonly string[], opt
     const close = new Promise<number | null>(resolve => {
       settleClose = code => {
         if (closed) return;
+        // Closing the leader's pipes does not prove that its descendants exited.
+        // Finish termination while we still own the process-group identity. Do
+        // not leave a SIGTERM-ignoring child alive when clearing the force timer.
+        if (terminating) signalProcess('SIGKILL');
         closed = true;
         resolve(code);
       };

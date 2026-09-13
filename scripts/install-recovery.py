@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install one shared recovery controller while preserving profile/configuration state."""
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -24,10 +25,18 @@ def install(runtime, profile, health_url, home, enable=True):
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings.update({"backendUrl": f"http://127.0.0.1:{config.get('http', {}).get('port', 3210)}",
                      "backendUnit": "chatgpt-mcp.service", "configPath": str(config_path),
-                     "stateDirectory": str(state), "canaryIntervalSeconds": 120})
+                     "stateDirectory": str(state), "canaryIntervalSeconds": 120,
+                     "expectedConfigSha256": hashlib.sha256(config_path.read_bytes()).hexdigest()})
+    settings.pop("expectedRuntime", None)
+    settings.pop("shellCanary", None)
+    allowed_commands = config.get("shell", {}).get("allowedCommands", [])
+    if config.get("shell", {}).get("enabled") and ("*" in allowed_commands or "node" in allowed_commands):
+        settings["shellCanary"] = {"command": "node", "args": ["-e", "process.stdout.write('mcp-shell-canary')"],
+                                  "expectedStdout": "mcp-shell-canary"}
     settings["expectedCapabilities"] = {"filesystemWrite": config.get("filesystem", {}).get("write", False),
                                          "shell": config.get("shell", {}).get("enabled", False)}
     settings["expectedTools"] = ["system.info"]
+    settings.pop("canaryDirectory", None)
     roots = config.get("filesystem", {}).get("roots", [])
     if settings["expectedCapabilities"]["filesystemWrite"] and roots:
         settings["expectedTools"].append("fs.write")

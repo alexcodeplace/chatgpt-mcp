@@ -30,6 +30,11 @@ def atomic_json(path, value):
             out.flush()
             os.fsync(out.fileno())
         os.replace(temp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -154,9 +159,13 @@ def error_status(result):
 
 def backend_probe(settings, canary=False):
     base = settings["backendUrl"].rstrip("/")
-    config = json.loads(pathlib.Path(settings["configPath"]).read_text())
+    config_bytes = pathlib.Path(settings["configPath"]).read_bytes()
+    config = json.loads(config_bytes)
+    if settings.get("expectedConfigSha256") and hashlib.sha256(config_bytes).hexdigest() != settings["expectedConfigSha256"]:
+        return "CONFIG_CHANGED", {}
     token = config.get("http", {}).get("token")
     endpoint = base + "/mcp"
+    phase = "control"
     try:
         health = json.loads(request(base + "/healthz"))
         if not health.get("ok"):
@@ -176,6 +185,12 @@ def backend_probe(settings, canary=False):
             if name not in names:
                 return "POLICY_MISMATCH", {"missingTool": name}
         evidence = {"catalogCount": len(names), "runtime": info.get("runtime", {})}
+        for key, value in settings.get("expectedRuntime", {}).items():
+            if evidence["runtime"].get(key) != value:
+                return "RUNTIME_MISMATCH", {"field": key}
+        # A successful control probe followed by a failed execution probe is not
+        # evidence that the HTTP backend disappeared. Never restart it for this.
+        phase = "execution"
         if canary and settings.get("canaryDirectory") and config.get("filesystem", {}).get("write"):
             target = str(pathlib.Path(settings["canaryDirectory"]) / ("probe-" + uuid.uuid4().hex))
             payload = uuid.uuid4().hex
@@ -202,11 +217,26 @@ def backend_probe(settings, canary=False):
                         evidence["cleanup"] = "failed"
             if evidence.get("cleanup") == "failed":
                 return "EXECUTION_FAILURE", evidence
+        if canary and config.get("shell", {}).get("enabled"):
+            probe = settings.get("shellCanary")
+            if probe:
+                result = rpc(endpoint, "tools/call", {"name": "shell.exec", "arguments": {
+                    "command": probe["command"], "args": probe.get("args", []), "timeoutMs": 1000,
+                }}, token)
+                status = error_status(result)
+                if status:
+                    return status, evidence
+                execution = result.get("structuredContent", {})
+                if execution.get("exitCode") != 0 or execution.get("timedOut") or execution.get("stdout") != probe["expectedStdout"]:
+                    return "EXECUTION_FAILURE", evidence
+                evidence["shellCanary"] = "passed"
+            else:
+                evidence["shellCanary"] = "not configured: no approved probe command"
         return "HEALTHY", evidence
     except urllib.error.HTTPError as error:
-        return ("AUTH_FAILURE" if error.code in (401, 403) else "BACKEND_UNAVAILABLE"), {"httpStatus": error.code}
+        return ("AUTH_FAILURE" if error.code in (401, 403) else ("BACKEND_UNAVAILABLE" if phase == "control" else "EXECUTION_FAILURE")), {"httpStatus": error.code}
     except (OSError, ValueError, KeyError, StopIteration, TypeError):
-        return "BACKEND_UNAVAILABLE", {}
+        return ("BACKEND_UNAVAILABLE" if phase == "control" else "EXECUTION_FAILURE"), {}
 
 
 def service_uptime(unit):
@@ -216,6 +246,46 @@ def service_uptime(unit):
         return max(0, time.monotonic() - stamp) if stamp else float("inf")
     except ValueError:
         return float("inf")
+
+
+def load_state(path, settings, now, dry_run=False):
+    """Recover a damaged ledger conservatively; never reset an unknown restart budget."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {"components": {}}
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+    try:
+        state = json.loads(raw)
+        if not isinstance(state, dict) or not isinstance(state.get("components"), dict):
+            raise ValueError("invalid state shape")
+        for key in ("lastTick", "lastCanary"):
+            if key in state and not number(state[key]):
+                raise ValueError("invalid state timestamp")
+        for component in state["components"].values():
+            if not isinstance(component, dict) or not isinstance(component.get("restarts", []), list):
+                raise ValueError("invalid component shape")
+            if not all(number(value) for value in component.get("restarts", [])):
+                raise ValueError("invalid restart history")
+            for key in ("failureStreak", "healthySince", "observedAt", "incidentStartedAt"):
+                if key in component and not number(component[key]):
+                    raise ValueError("invalid component timestamp or counter")
+            if component.get("incidentOpen") and not all(key in component for key in ("incidentId", "incidentStartedAt")):
+                raise ValueError("incomplete incident")
+        return state
+    except (ValueError, TypeError, UnicodeError):
+        budget = {**DEFAULT_POLICY, **settings.get("policy", {})}["maxRestartsPerHour"]
+        names = ["backend"] + [profile["name"] for profile in settings.get("profiles", [])]
+        state = {"components": {name: {"restarts": [now] * budget, "budgetConservative": True} for name in names},
+                 "lastTick": now, "stateRecoveredAt": now}
+        if not dry_run:
+            # Bounded private evidence, not arbitrary contents in the journal.
+            atomic_json(path.parent / "state-recovery.json", {"status": "STATE_INVALID", "observedAt": now,
+                        "previousStateSha256": hashlib.sha256(raw).hexdigest(), "restartBudgetHeldUntil": now + 3600})
+            atomic_json(path, state)
+            print(json.dumps({"status": "STATE_INVALID", "action": "conservative_budget_recovery"}), flush=True)
+        return state
 
 
 def tick(settings, dry_run=False):
@@ -228,11 +298,8 @@ def tick(settings, dry_run=False):
             return {"status": "already_running"}
         # Deployment holds this same lock, so rollback and recovery cannot race.
         state_file = state_dir / "state.json"
-        try:
-            state = json.loads(state_file.read_text())
-        except FileNotFoundError:
-            state = {"components": {}}
         now = time.time()
+        state = load_state(state_file, settings, now, dry_run)
         # Backwards wall-clock jumps invalidate timers, but never erase restart budgets.
         if state.get("lastTick", 0) > now + 5:
             return {"status": "CLOCK_SKEW", "action": "none"}
@@ -256,7 +323,8 @@ def tick(settings, dry_run=False):
                             "queued": metric_value(text, "commands_queue_length")}
             except (OSError, ValueError, subprocess.SubprocessError):
                 status = "TUNNEL_UNAVAILABLE"
-            if backend == "BACKEND_UNAVAILABLE":
+            if backend not in {"HEALTHY", "OVERLOADED"}:
+                evidence["observedTunnelStatus"] = status
                 status = "DEPENDENCY_UNAVAILABLE"
             samples.append((profile["name"], profile["unit"], status, evidence))
         reports = []
