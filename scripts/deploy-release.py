@@ -70,6 +70,8 @@ def rollback(plan_path):
         plan = json.loads(pathlib.Path(plan_path).read_text())
         if plan.get('committed') or plan.get('rolledBack'):
             return
+        for profile in set(plan.get('newProfiles', [])) & set(plan.get('touchedProfiles', [])):
+            systemctl('disable', '--now', f'chatgpt-mcp-tunnel-{profile}.service', check=False)
         for item in reversed(plan['files']):
             target = pathlib.Path(item['path'])
             if item['backup'] is None:
@@ -78,6 +80,8 @@ def rollback(plan_path):
                 atomic_text(target, pathlib.Path(item['backup']).read_text())
         systemctl('daemon-reload')
         for profile in plan.get('touchedProfiles', []):
+            if profile in plan.get('newProfiles', []):
+                continue
             systemctl('restart', f'chatgpt-mcp-tunnel-{profile}.service', check=False)
         for timer in plan.get('enabledLegacyTimers', []):
             systemctl('enable', '--now', timer, check=False)
@@ -196,13 +200,115 @@ def wait_backend(settings, timeout=40):
     raise RuntimeError('candidate failed final loaded-configuration and execution verification')
 
 
+def read_activation_value(path):
+    """Read legacy activation syntax without evaluating shell code or printing secrets."""
+    with pathlib.Path(path).open('r', encoding='utf-8') as source:
+        text = source.read(32769)
+    if len(text) > 32768:
+        raise ValueError('activation file exceeds the input budget')
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    if len(lines) != 1:
+        raise ValueError('activation file must contain exactly one non-comment value')
+    value = re.sub(r'^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*', '', lines[0])
+    if len(value) >= 2 and value[0] in ['"', "'"] and value[-1] == value[0]:
+        value = value[1:-1]
+    if not value or any(character in value for character in '\r\n\0'):
+        raise ValueError('activation file has an invalid value')
+    return value
+
+
+def bootstrap_profile(args, home):
+    """Require a new alias and independently confirmed, unused desktop identity."""
+    if len(args.profile) != 1 or not getattr(args, 'identity_verified_unused', False):
+        raise ValueError('bootstrap requires one profile and --identity-verified-unused after local provenance checks')
+    name, separator, key = args.profile[0].partition('=')
+    if not separator or not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+        raise ValueError('--profile requires NAME=/absolute/runtime-key-file')
+    if name in ['.', '..'] or not pathlib.Path(key).expanduser().is_absolute():
+        raise ValueError('bootstrap requires a safe alias and absolute key-file path')
+    path = home / '.config/tunnel-client' / (name + '.yaml')
+    units = home / '.config/systemd/user'
+    # Bootstrap must not replace an installed controller, backend or tunnel.
+    occupied = [home / '.config/chatgpt-mcp/active.json', home / '.config/chatgpt-mcp/recovery.json', path,
+                units / f'chatgpt-mcp-tunnel-{name}.service']
+    occupied += list(units.glob('chatgpt-mcp*.service'))
+    occupied += list((home / '.config/systemd/user.control').glob('chatgpt-mcp*.service*'))
+    if any(item.exists() or item.is_symlink() for item in occupied):
+        raise ValueError('existing MCP/profile installation detected; use upgrade or reconcile it before bootstrap')
+    if getattr(args, 'tunnel_id_file', None) is None:
+        raise ValueError('bootstrap requires --tunnel-id-file from the verified desktop activation')
+    tunnel_id = read_activation_value(args.tunnel_id_file)
+    if not re.fullmatch(r'tunnel_[0-9a-f]{32}', tunnel_id):
+        raise ValueError('activation file does not contain a valid tunnel identifier')
+    key_path = pathlib.Path(key).expanduser().resolve()
+    read_activation_value(key_path)
+    for installed in path.parent.glob('*.yaml'):
+        if tunnel_id in installed.read_text():
+            raise ValueError('desktop tunnel identity appears in an existing profile; refusing duplicate polling')
+    requested_port = getattr(args, 'health_port', None)
+    ports = [requested_port] if requested_port is not None else range(8180, 8280)
+    for port in ports:
+        if not 1024 <= port <= 65535:
+            raise ValueError('health port must be unprivileged and valid')
+        with socket.socket() as probe:
+            try:
+                probe.bind(('127.0.0.1', port))
+                break
+            except OSError:
+                continue
+    else:
+        raise ValueError('no free loopback health port; existing listeners were not changed')
+    return {'name': name, 'key': str(key_path), 'path': str(path), 'healthUrl': f'http://127.0.0.1:{port}',
+            'original': None, 'bootstrapTunnelId': tunnel_id}
+
+
+def materialize_bootstrap(profile, tunnel, directory, backend_url, config):
+    """Only private staging files change before the independently guarded activation."""
+    stage = directory / 'profile-stage'
+    stage.mkdir(mode=0o700)
+    command = [str(tunnel), 'init', '--sample', 'sample_mcp_remote_no_auth', '--profile', profile['name'],
+               '--profile-dir', str(stage), '--tunnel-id', profile['bootstrapTunnelId'],
+               '--health-listen-addr', profile['healthUrl'].removeprefix('http://'), '--mcp-server-url', backend_url + '/mcp']
+    try:
+        result = run(*command, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError('private tunnel profile initialization failed; no existing profile changed') from None
+    if result.returncode != 0:
+        # CalledProcessError would include the private tunnel ID in its argv.
+        raise RuntimeError('private tunnel profile initialization failed; no existing profile changed')
+    generated = stage / (profile['name'] + '.yaml')
+    text = generated.read_text()
+    generated.chmod(0o600)
+    if profile['bootstrapTunnelId'] not in text or backend_url + '/mcp' not in text:
+        raise ValueError('generated profile does not match the staged desktop target')
+    key = directory / 'desktop-runtime-api-key'
+    atomic_text(key, read_activation_value(profile['key']) + '\n')
+    profile['key'] = str(key)
+    token = config.get('http', {}).get('token')
+    if token is not None:
+        if not isinstance(token, str) or not token or any(c in token for c in '\r\n\0'):
+            raise ValueError('invalid backend authentication token')
+        authorization = directory / 'desktop-backend-authorization'
+        atomic_text(authorization, 'Bearer ' + token + '\n')
+        reference = json.dumps('file:' + str(authorization))
+        if text.count('\nmcp:\n') != 1:
+            raise ValueError('unexpected generated MCP profile structure')
+        text = text.replace('\nmcp:\n', '\nmcp:\n  extra_headers:\n    Authorization: ' + reference + '\n  discovery_extra_headers:\n    Authorization: ' + reference + '\n', 1)
+    profile['stagedProfile'] = text
+
+
 def deploy(args):
     home = pathlib.Path.home()
     release = args.release.resolve()
     manifest = verify(release)
     revision = manifest['revision']
-    profiles = []
-    for value in args.profile:
+    if getattr(args, 'bootstrap', False) and (release / 'scripts/deploy-release.py').read_bytes() != pathlib.Path(__file__).read_bytes():
+        raise ValueError('bootstrap helper must match the packaged release, including rollback support')
+    bootstrap = bool(getattr(args, 'bootstrap', False))
+    if not bootstrap and any(getattr(args, field, None) for field in ('tunnel_id_file', 'identity_verified_unused', 'health_port')):
+        raise ValueError('desktop activation options require explicit --bootstrap mode')
+    profiles = [bootstrap_profile(args, home)] if bootstrap else []
+    for value in ([] if bootstrap else args.profile):
         name, separator, key = value.partition('=')
         if not separator or not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
             raise ValueError('--profile requires NAME=/absolute/runtime-key-file')
@@ -266,14 +372,13 @@ def deploy(args):
             systemctl('restart', unit)
         results['finalBackend'] = wait_backend(settings)
         atomic_json(directory / 'canary-results.json', results)
-    except Exception:
-        systemctl('disable', '--now', unit, check=False)
-        raise
-    library = home / '.local/lib/chatgpt-mcp'
-    library.mkdir(parents=True, exist_ok=True)
-    tunnel = pathlib.Path(run('python3', str(release / 'scripts/install-tunnel.py'), timeout=100).stdout.strip())
-    launcher = library / ('run-tunnel-' + revision[:12] + '.sh')
-    atomic_text(launcher, '''#!/usr/bin/env bash
+        library = home / '.local/lib/chatgpt-mcp'
+        library.mkdir(parents=True, exist_ok=True)
+        tunnel = pathlib.Path(run('python3', str(release / 'scripts/install-tunnel.py'), timeout=100).stdout.strip())
+        if bootstrap:
+            materialize_bootstrap(profiles[0], tunnel, directory, settings['backendUrl'], config)
+        launcher = library / ('run-tunnel-' + revision[:12] + '.sh')
+        atomic_text(launcher, '''#!/usr/bin/env bash
 set -Eeuo pipefail
 : "${TUNNEL_CLIENT_BIN:?}" "${TUNNEL_API_KEY_FILE:?}" "${CHATGPT_MCP_PROFILE:?}"
 version="$("$TUNNEL_CLIENT_BIN" --version)"
@@ -281,9 +386,13 @@ version="$("$TUNNEL_CLIENT_BIN" --version)"
 export CONTROL_PLANE_API_KEY="$(head -n1 "$TUNNEL_API_KEY_FILE" | tr -d '\\r\\n')"
 exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
 ''', 0o700)
+    except Exception:
+        systemctl('disable', '--now', unit, check=False)
+        raise
     plan = {'directory': str(directory), 'lockPath': str(lock_path), 'backendUnit': unit, 'revision': revision, 'files': [], 'touchedProfiles': [], 'enabledLegacyTimers': [],
-            'previousBackendUnit': previous_unit, 'previousBackendWasEnabled': systemctl('is-enabled', previous_unit, check=False).returncode == 0,
-            'recoveryWasEnabled': systemctl('is-enabled', 'chatgpt-mcp-recovery.timer', check=False).returncode == 0}
+            'previousBackendUnit': None if bootstrap else previous_unit, 'previousBackendWasEnabled': False if bootstrap else systemctl('is-enabled', previous_unit, check=False).returncode == 0,
+            'recoveryWasEnabled': systemctl('is-enabled', 'chatgpt-mcp-recovery.timer', check=False).returncode == 0,
+            'newProfiles': [p['name'] for p in profiles] if bootstrap else []}
     plan_path = directory / 'plan.json'
     atomic_json(plan_path, plan)
     guard = 'chatgpt-mcp-rollback-' + revision[:12]
@@ -296,7 +405,7 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
         signal.alarm(300)
         with open(lock_path, 'a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            for profile in profiles:
+            for profile in ([] if bootstrap else profiles):
                 timer = f"chatgpt-mcp-watchdog-{profile['name']}.timer"
                 if systemctl('is-enabled', timer, check=False).returncode == 0:
                     plan['enabledLegacyTimers'].append(timer)
@@ -305,23 +414,33 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
                 systemctl('stop', f"chatgpt-mcp-watchdog-{profile['name']}.service", check=False)
             for profile in profiles:
                 name = profile['name']
-                wait_idle(profile['healthUrl'])
                 path = pathlib.Path(profile['path'])
-                if path.read_text() != profile['original']:
-                    raise RuntimeError('profile changed during staging; refusing to overwrite it')
-                changed, count = re.subn(r'(?m)^(\s*url:\s*[\"\']?)http://(?:127\.0\.0\.1|localhost):[0-9]+/mcp([\"\']?\s*)$', r'\g<1>http://127.0.0.1:' + str(port) + r'/mcp\2', profile['original'])
-                if count != 1:
-                    raise ValueError('expected exactly one loopback MCP URL in the profile')
-                backup(plan, path)
                 base_unit = units / f'chatgpt-mcp-tunnel-{name}.service'
+                if bootstrap:
+                    if path.exists() or path.is_symlink() or base_unit.exists() or base_unit.is_symlink():
+                        raise RuntimeError('bootstrap target appeared during staging; refusing to overwrite it')
+                    if recovery_config.exists() or (home / '.config/chatgpt-mcp/active.json').exists():
+                        raise RuntimeError('MCP installation appeared during staging; refusing to replace it')
+                    changed = profile['stagedProfile']
+                    rewritten = ['[Unit]', 'Description=Desktop MCP tunnel', 'After=network-online.target',
+                                 '[Service]', 'Type=simple',
+                                 'UnsetEnvironment=CONTROL_PLANE_TUNNEL_ID TUNNEL_CLIENT_CONFIG TUNNEL_CLIENT_PROFILE_FILE TUNNEL_CLIENT_PROFILE MCP_SERVER_URL MCP_COMMAND HEALTH_LISTEN_ADDR MCP_EXTRA_HEADERS MCP_DISCOVERY_EXTRA_HEADERS',
+                                 '[Install]', 'WantedBy=default.target']
+                else:
+                    wait_idle(profile['healthUrl'])
+                    if path.read_text() != profile['original']:
+                        raise RuntimeError('profile changed during staging; refusing to overwrite it')
+                    changed, count = re.subn(r'(?m)^(\s*url:\s*[\"\']?)http://(?:127\.0\.0\.1|localhost):[0-9]+/mcp([\"\']?\s*)$', r'\g<1>http://127.0.0.1:' + str(port) + r'/mcp\2', profile['original'])
+                    if count != 1:
+                        raise ValueError('expected exactly one loopback MCP URL in the profile')
+                    rewritten = []
+                    for line in base_unit.read_text().splitlines():
+                        if line.startswith(('Wants=', 'Requires=', 'After=')):
+                            key, value = line.split('=', 1)
+                            line = key + '=' + ' '.join(unit if item == previous_unit else item for item in value.split())
+                        rewritten.append(line)
+                backup(plan, path)
                 backup(plan, base_unit)
-                base = base_unit.read_text()
-                rewritten = []
-                for line in base.splitlines():
-                    if line.startswith(('Wants=', 'Requires=', 'After=')):
-                        key, value = line.split('=', 1)
-                        line = key + '=' + ' '.join(unit if item == previous_unit else item for item in value.split())
-                    rewritten.append(line)
                 dropin = units / f'chatgpt-mcp-tunnel-{name}.service.d/60-reliability.conf'
                 backup(plan, dropin)
                 plan['touchedProfiles'].append(name)
@@ -349,6 +468,8 @@ TimeoutStopSec=10
                 systemctl('reset-failed', f'chatgpt-mcp-tunnel-{name}.service', check=False)
                 systemctl('restart', f'chatgpt-mcp-tunnel-{name}.service')
                 age = wait_poll(profile['healthUrl'])
+                if bootstrap:
+                    systemctl('enable', f'chatgpt-mcp-tunnel-{name}.service')
                 print(json.dumps({'profile': name, 'pollAgeSeconds': age, 'status': 'fresh_poll_after_upgrade'}), flush=True)
             for target in [recovery_config, library / 'recovery.py', units / 'chatgpt-mcp-recovery.service', units / 'chatgpt-mcp-recovery.timer', home / '.config/chatgpt-mcp/active.json']:
                 backup(plan, target)
@@ -364,17 +485,18 @@ TimeoutStopSec=10
             status, evidence = backend_probe(recovery_settings, canary=True)
             if status != 'HEALTHY':
                 raise RuntimeError('final capability canary failed: ' + status)
-            active = {**settings, 'releaseDirectory': str(release), 'revision': revision, 'previousBackendUnit': previous_unit, 'deploymentDirectory': str(directory), 'profiles': [{k: p[k] for k in ['name', 'healthUrl']} for p in profiles]}
+            active = {**settings, 'releaseDirectory': str(release), 'revision': revision, 'previousBackendUnit': None if bootstrap else previous_unit, 'deploymentDirectory': str(directory), 'profiles': [{k: p[k] for k in ['name', 'healthUrl']} for p in profiles]}
             atomic_json(home / '.config/chatgpt-mcp/active.json', active)
             systemctl('daemon-reload')
             systemctl('enable', '--now', 'chatgpt-mcp-recovery.timer')
-            systemctl('disable', previous_unit, check=False)  # deliberately NOT --now
+            if not bootstrap:
+                systemctl('disable', previous_unit, check=False)  # deliberately NOT --now
             plan['committed'] = True
             plan['finalEvidence'] = evidence
             atomic_json(plan_path, plan)
         signal.alarm(0)
         systemctl('stop', guard + '.timer', check=False)
-        print(json.dumps({'status': 'committed', 'revision': revision, 'backendUnit': unit, 'backendUrl': settings['backendUrl'], 'plan': str(plan_path), 'previousBackendLeftRunning': previous_unit}), flush=True)
+        print(json.dumps({'status': 'committed', 'revision': revision, 'backendUnit': unit, 'backendUrl': settings['backendUrl'], 'plan': str(plan_path), 'previousBackendLeftRunning': None if bootstrap else previous_unit}), flush=True)
     except BaseException:
         signal.alarm(0)
         rollback(plan_path)
@@ -390,6 +512,10 @@ if __name__ == '__main__':
     item.add_argument('--node', type=pathlib.Path, default=pathlib.Path(shutil.which('node') or '/usr/bin/node'))
     item.add_argument('--profile', action='append', required=True, help='NAME=/absolute/runtime-key-file')
     item.add_argument('--enable-jobs', action='store_true')
+    item.add_argument('--bootstrap', action='store_true', help='Explicit first install only; never replace an existing MCP profile/controller')
+    item.add_argument('--tunnel-id-file', type=pathlib.Path, help='Existing, verified desktop activation file; value is never printed')
+    item.add_argument('--identity-verified-unused', action='store_true', help='Assert local inspection found no process/profile already polling this desktop identity')
+    item.add_argument('--health-port', type=int, help='Bootstrap-only unoccupied loopback health port')
     item.add_argument('--canary-directory', type=pathlib.Path)
     item.add_argument('--working-directory', type=pathlib.Path, help='Defaults to the current backend working directory, not its configuration directory')
     item = sub.add_parser('rollback')
