@@ -19,7 +19,7 @@ Main 6762464 already contained the first hardening implementation beaf62b. The a
 
 The preserved baseline reproducer on debian1 returned timedOut=true while its descendant remained in sleeping state. The new regression test passes with final process-group cleanup.
 
-The full frozen-install gate ran on debian1 in /tmp/chatgpt-mcp-acceptance-20260913. TypeScript typecheck/build and 142 TypeScript tests passed. The Python suite passed 27 behavioral tests, including a real loopback HTTP fixture with green readiness and stale poll timestamps. Systemctl is stubbed in unit tests so they cannot restart live services.
+The full frozen-install gate ran on debian1 in /tmp/chatgpt-mcp-acceptance-20260913. TypeScript typecheck/build and 142 TypeScript tests passed. The Python suite passed 28 behavioral tests, including a real loopback HTTP fixture with green readiness and stale poll timestamps. Systemctl is stubbed in unit tests so they cannot restart live services.
 
 Final production release identity, staged canary results, guarded rollout result and live connector evidence belong in the active deployment's private acceptance.json. A source commit or passing unit suite alone is not proof that deployment succeeded. Inspect ~/.config/chatgpt-mcp/active.json and the referenced deployment directory before reporting completion.
 
@@ -28,3 +28,7 @@ Final production release identity, staged canary results, guarded rollout result
 The desktop connector was probed twice during this follow-up and returned tunnel_client_not_seen. No configured desktop SSH route was found, and the existing e14 hostname did not resolve from the VM. This is lack of a verified management connection, not a write-permission denial. Give the desktop agent docs/DESKTOP-UPDATE.md together with the exact VM-validated release revision. Do not copy VM tunnel identities or credentials.
 
 These targeted fault tests and live checks are not a multi-day soak or a guarantee against an upstream service refusing or ceasing to dispatch requests.
+
+## Native unit validation follow-up
+
+The e1068ba candidate was rejected before any tunnel changed because its WorkingDirectory value had literal quotes. The original release remained active. The generator was corrected, and backend unit rendering is now checked with the real systemd parser before enabling any candidate. A regression runs the native parser against the generated unit (including a directory containing spaces) and confirms that the original quoted-path mistake is rejected. Candidate startup failures now share the same cleanup path as other pre-cutover failures. The failed candidate unit and journal were preserved in its private deployment evidence, not hot-patched in the immutable release.

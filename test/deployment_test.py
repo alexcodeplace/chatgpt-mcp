@@ -122,6 +122,25 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual(deploy.working_directory(root / 'new-deployment/config.json', 'old.service'), previous)
                 self.assertEqual(deploy.working_directory(root / 'config.json', 'old.service', root), root)
 
+    @unittest.skipUnless(shutil.which('systemd-analyze'), 'native systemd verifier unavailable')
+    def test_native_unit_parser_accepts_generated_unit_and_rejects_quoted_working_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            work = root / 'directory with spaces'
+            work.mkdir()
+            runtime = root / 'xdg-runtime'
+            runtime.mkdir(mode=0o700)
+            env = {**os.environ, 'XDG_RUNTIME_DIR': str(runtime)}
+            path = root / 'mcp-unit-fixture.service'
+            text = deploy.backend_unit_text('a' * 40, root, work, root / 'config.json', pathlib.Path(shutil.which('node')))
+            path.write_text(text)
+            result = subprocess.run(['systemd-analyze', '--user', 'verify', str(path)], capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path.write_text(text.replace('WorkingDirectory=' + str(work), 'WorkingDirectory="' + str(work) + '"'))
+            invalid = subprocess.run(['systemd-analyze', '--user', 'verify', str(path)], capture_output=True, text=True, env=env)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn('path is not absolute', invalid.stderr)
+
     def test_drain_checks_both_worker_and_queue_occupancy(self):
         samples = [
             'dispatcher_worker_pool_occupancy 0\ncommands_queue_length 1\n',
