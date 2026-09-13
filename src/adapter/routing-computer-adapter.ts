@@ -29,7 +29,7 @@ export class RoutingComputerAdapter extends LocalComputerAdapter {
 
   override async exec(request: ExecRequest): Promise<ExecResult> {
     const route = this.classifyExec(request);
-    if (route === 'shell-local') {
+    if (route !== 'shell-remote') {
       this.metrics.recordRoute(this.routingConfig.execution.kubernetes.localOnlyCommands.includes(request.command) ? 'forced-local' : 'local');
       const started = process.hrtime.bigint();
       const result = await super.exec(request);
