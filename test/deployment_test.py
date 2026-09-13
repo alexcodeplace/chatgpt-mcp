@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -45,10 +46,20 @@ class DeploymentTests(unittest.TestCase):
             (source / '.secrets').mkdir()
             (source / '.secrets/runtime-api-key').write_text('SECRET-KEY')
             (source / 'node_modules/alias').symlink_to('fixture')
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-qm', 'fixture'], check=True)
+            revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
             destination = pathlib.Path(tmp) / 'release'
             try:
-                manifest = release.pack(source, destination, 'a' * 40)
-                self.assertEqual(release.verify(destination)['revision'], 'a' * 40)
+                with self.assertRaisesRegex(ValueError, 'revision does not match'):
+                    release.pack(source, destination, 'a' * 40)
+                (source / 'README.md').write_text('uncommitted source')
+                with self.assertRaisesRegex(ValueError, 'not clean'):
+                    release.pack(source, destination, revision)
+                subprocess.run(['git', '-C', str(source), 'restore', 'README.md'], check=True)
+                manifest = release.pack(source, destination, revision)
+                self.assertEqual(release.verify(destination)['revision'], revision)
                 self.assertNotIn('config.local.json', manifest['files'])
                 self.assertFalse((destination / '.secrets').exists())
                 self.assertEqual((destination / 'node_modules/alias').read_text(), 'tracked artifact\n')
@@ -101,6 +112,15 @@ class DeploymentTests(unittest.TestCase):
             with mock.patch.object(deploy, 'systemctl') as systemctl:
                 deploy.rollback(path)
                 systemctl.assert_not_called()
+
+    def test_upgrade_preserves_the_running_backend_working_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            previous = root / 'original-runtime'
+            previous.mkdir()
+            with mock.patch.object(deploy, 'systemctl', return_value=mock.Mock(returncode=0, stdout=str(previous) + '\n')):
+                self.assertEqual(deploy.working_directory(root / 'new-deployment/config.json', 'old.service'), previous)
+                self.assertEqual(deploy.working_directory(root / 'config.json', 'old.service', root), root)
 
     def test_drain_checks_both_worker_and_queue_occupancy(self):
         samples = [

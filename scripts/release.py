@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True
@@ -43,11 +44,28 @@ def verify(root):
     return manifest
 
 
+def verify_source(source, revision):
+    """Do not label a dirty checkout or a different commit as the requested release."""
+    def git(*args):
+        return subprocess.run(['git', '-C', str(source), *args], check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+    try:
+        if pathlib.Path(git('rev-parse', '--show-toplevel')).resolve() != source.resolve():
+            raise ValueError('release source must be a repository worktree root')
+        if git('rev-parse', 'HEAD') != revision:
+            raise ValueError('release revision does not match source HEAD')
+        inputs = [name for name in ALLOWED if name not in ('dist/src', 'node_modules')]
+        if git('status', '--porcelain', '--untracked-files=all', '--', *inputs):
+            raise ValueError('release source inputs are not clean and committed')
+    except subprocess.SubprocessError as error:
+        raise ValueError('release source must be a verified Git worktree') from error
+
+
 def pack(source, destination, revision):
     if not re.fullmatch(r'[a-f0-9]{40}', revision):
         raise ValueError('a full source commit is required')
     if destination.exists():
         raise ValueError('release destination already exists; refusing to overwrite it')
+    verify_source(source, revision)
     destination.mkdir(parents=True)
     try:
         for name in ALLOWED:

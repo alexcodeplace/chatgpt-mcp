@@ -49,7 +49,7 @@ python3 scripts/release.py pack \
 python3 "$RELEASE/scripts/release.py" verify "$RELEASE"
 ```
 
-The package excludes `config.local.json`, `.secrets` and Git state. Its content manifest is verified again at backend startup. Do not edit files in the packaged release. An existing destination must be verified, not overwritten. The runtime-key files stay in their original private locations.
+Packaging refuses a mismatched revision or uncommitted source inputs. Build artifacts must be copied back into the clean source worktree after an approved remote build; package from that worktree, not an unversioned extraction. The package excludes `config.local.json`, `.secrets` and Git state. Its content manifest is verified again at backend startup. Do not edit files in the packaged release. An existing destination must be verified, not overwritten. The runtime-key files stay in their original private locations.
 
 ## 4. Set host-specific values from the inspected installation
 
@@ -79,7 +79,7 @@ journalctl --user -u "$ROLLOUT" --no-pager
 
 For multiple desktop accounts, repeat `--profile "NAME=/existing/private/key-file"` for every profile sharing this backend. The script preserves their existing tunnel identities, authentication settings and other YAML settings. It only changes the one expected loopback MCP URL per profile and installs the pinned launcher. It refuses unexpected layouts or profile edits made during staging.
 
-The script first starts a separate candidate backend, runs filesystem and durable-job canaries, restarts that private candidate while a job is running, and verifies the retained result. Only then does it arm an independent rollback timer and switch tunnel profiles one at a time. Each switched profile must demonstrate a fresh successful control-plane poll. A failed rollout restores the original routes without killing either backend's user work.
+The script first starts a separate candidate backend, runs filesystem and durable-job canaries in a private staging ledger, restarts that private candidate while a job is running, and verifies the retained result. It then loads the production job ledger without submitting candidate jobs to it and verifies the final configuration and real shell execution. The previous backend working directory is preserved automatically. Only then does it arm an independent rollback timer and switch tunnel profiles one at a time. Each switched profile must demonstrate a fresh successful control-plane poll. A failed rollout restores the original routes without killing either backend's user work.
 
 Do not repeatedly submit the deployment command if its reply is lost. Inspect its independent service journal and deployment plan first. Reusing a release with an existing runtime unit deliberately fails instead of starting duplicate deployments.
 
@@ -91,7 +91,7 @@ cat "$HOME/.config/chatgpt-mcp/active.json"
 journalctl --user -u chatgpt-mcp-recovery.service --no-pager --lines=40
 ```
 
-Confirm the active release revision matches the intended commit, both local capabilities and each profile's poll freshness pass, and the old per-profile watchdog timers are disabled. Confirm the shared recovery controller reaches a stable healthy phase without spending restart budgets. Its state is at `~/.local/state/chatgpt-mcp/recovery/state.json`.
+Confirm the active release revision matches the intended commit, the shell and filesystem canaries pass, both local capabilities and each profile's poll freshness pass, and the old per-profile watchdog timers are disabled. Confirm the shared recovery controller reaches a stable healthy phase without spending restart budgets. Its state is at `~/.local/state/chatgpt-mcp/recovery/state.json`.
 
 From a fresh or refreshed ChatGPT connector, call `system.info`, perform a harmless allowed write/read/delete canary, and verify that long operations can use `exec.start`, `exec.status`, `exec.output` and `exec.cancel`. Do not equate a cached old catalog with disabled access. For an existing conversation, `scripts/mcp-job.py` bridges durable jobs through the old shell tool.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Blue/green local rollout. Keep the previous backend and its children alive."""
 import argparse
+import copy
 import fcntl
 import hashlib
 import importlib.util
@@ -127,6 +128,39 @@ def wait_poll(url):
     raise RuntimeError('new tunnel did not demonstrate fresh control-plane polling')
 
 
+def working_directory(config_path, previous_unit, explicit=None):
+    if explicit is not None:
+        path = pathlib.Path(explicit).resolve()
+    else:
+        result = systemctl('show', previous_unit, '-p', 'WorkingDirectory', '--value', check=False)
+        value = result.stdout.strip() if result.returncode == 0 else ''
+        path = pathlib.Path(value).resolve() if value else config_path.resolve().parent
+    if not path.is_dir() or any(character in str(path) for character in '\r\n'):
+        raise ValueError('backend working directory must be an existing directory')
+    return path
+
+
+def staging_config(config, directory):
+    """Candidate fault tests must never submit or expire jobs in the live ledger."""
+    candidate = copy.deepcopy(config)
+    if candidate.get('jobs', {}).get('enabled'):
+        candidate['jobs']['directory'] = str(directory / 'canary-jobs')
+    return candidate
+
+
+def wait_backend(settings, timeout=40):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status, evidence = backend_probe(settings, canary=True)
+            if status == 'HEALTHY':
+                return evidence
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.5)
+    raise RuntimeError('candidate failed final loaded-configuration and execution verification')
+
+
 def deploy(args):
     home = pathlib.Path.home()
     release = args.release.resolve()
@@ -156,6 +190,7 @@ def deploy(args):
     if recovery_config.exists():
         previous_unit = json.loads(recovery_config.read_text()).get('backendUnit', previous_unit)
     config = json.loads(args.config.read_text())
+    cwd = working_directory(args.config, previous_unit, getattr(args, 'working_directory', None))
     port = free_port()
     config.setdefault('http', {})['host'] = '127.0.0.1'
     config['http']['port'] = port
@@ -165,7 +200,8 @@ def deploy(args):
         jobs.setdefault('directory', str(state / 'jobs'))
         jobs.setdefault('maxConcurrent', 2)
     config_path = directory / 'config.local.json'
-    atomic_json(config_path, config)
+    candidate = staging_config(config, directory)
+    atomic_json(config_path, candidate)
     unit = f'chatgpt-mcp-runtime-{revision[:12]}.service'
     units = home / '.config/systemd/user'
     unit_path = units / unit
@@ -174,9 +210,11 @@ def deploy(args):
     node = args.node.resolve()
     if not node.is_file():
         raise ValueError('Node runtime executable is missing')
-    settings = {'backendUrl': f'http://127.0.0.1:{port}', 'backendUnit': unit, 'configPath': str(config_path),
+    settings = {'backendUrl': f'http://127.0.0.1:{port}', 'backendUnit': unit, 'configPath': str(config_path), 'workingDirectory': str(cwd),
                 'canaryDirectory': str(args.canary_directory.resolve() if args.canary_directory else directory / 'canary'),
                 'expectedTools': ['system.info'], 'expectedCapabilities': {'filesystemWrite': config.get('filesystem', {}).get('write', False), 'shell': config.get('shell', {}).get('enabled', False)}}
+    if config.get('shell', {}).get('enabled') and any(command in config['shell'].get('allowedCommands', []) for command in ['*', 'node']):
+        settings['shellCanary'] = {'command': 'node', 'args': ['-e', "process.stdout.write('mcp-shell-canary')"], 'expectedStdout': 'mcp-shell-canary'}
     atomic_json(directory / 'candidate-settings.json', settings)
     unit_text = f'''[Unit]
 Description=Identified MCP runtime {revision}
@@ -185,7 +223,7 @@ StartLimitIntervalSec=300
 StartLimitBurst=3
 [Service]
 Type=simple
-WorkingDirectory={args.config.resolve().parent}
+WorkingDirectory="{cwd}"
 Environment=CHATGPT_MCP_CONFIG={config_path}
 Environment=CHATGPT_MCP_RELEASE={revision}
 Environment=CHATGPT_MCP_TRACE=1
@@ -213,6 +251,13 @@ WantedBy=default.target
     systemctl('enable', '--now', unit)
     try:
         results = validate(settings, unit)
+        results['stagingJobLedgerIsolated'] = candidate.get('jobs', {}).get('directory') != config.get('jobs', {}).get('directory') if config.get('jobs', {}).get('enabled') else 'not enabled'
+        # All destructive/restart canaries have finished. Load the production
+        # ledger only now, without issuing any candidate job submissions to it.
+        if candidate != config:
+            atomic_json(config_path, config)
+            systemctl('restart', unit)
+        results['finalBackend'] = wait_backend(settings)
         atomic_json(directory / 'canary-results.json', results)
     except Exception:
         systemctl('disable', '--now', unit, check=False)
@@ -304,6 +349,8 @@ TimeoutStopSec=10
                 run('python3', str(release / 'scripts/install-recovery.py'), '--runtime', str(directory), '--profile', profile['name'], '--health-url', profile['healthUrl'], '--no-enable')
             recovery_settings = json.loads(recovery_config.read_text())
             recovery_settings['backendUnit'] = unit
+            recovery_settings['canaryDirectory'] = settings['canaryDirectory']
+            recovery_settings['expectedRuntime'] = {key: results['finalBackend']['runtime'][key] for key in ('release', 'configFingerprint')}
             if config.get('jobs', {}).get('enabled') and config.get('shell', {}).get('enabled'):
                 recovery_settings['expectedTools'] += ['exec.start', 'exec.status', 'exec.output', 'exec.cancel']
             atomic_json(recovery_config, recovery_settings)
@@ -337,6 +384,7 @@ if __name__ == '__main__':
     item.add_argument('--profile', action='append', required=True, help='NAME=/absolute/runtime-key-file')
     item.add_argument('--enable-jobs', action='store_true')
     item.add_argument('--canary-directory', type=pathlib.Path)
+    item.add_argument('--working-directory', type=pathlib.Path, help='Defaults to the current backend working directory, not its configuration directory')
     item = sub.add_parser('rollback')
     item.add_argument('--plan', type=pathlib.Path, required=True)
     args = parser.parse_args()

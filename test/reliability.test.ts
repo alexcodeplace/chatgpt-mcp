@@ -70,3 +70,35 @@ test('atomic replacement does not bypass symlink or frozen-entry policy', { skip
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+
+test('timeout kills TERM-ignoring descendants even after all output pipes close', { skip: process.platform !== 'linux' }, async () => {
+  const program = `const {spawn}=require('node:child_process');
+    const child=spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],{stdio:'ignore'});
+    console.log(child.pid);setInterval(()=>{},1000);`;
+  let childPid: number | undefined;
+  try {
+    const result = await spawnBounded(process.execPath, ['-e', program], { timeoutMs: 500, maxOutputBytes: 4096, operation: 'test.terminated.descendant' });
+    childPid = Number(result.stdout.trim());
+    assert.ok(Number.isInteger(childPid) && childPid > 1);
+    assert.equal(result.timedOut, true);
+    let state = 'unknown';
+    const deadline = performance.now() + 1000;
+    do {
+      try {
+        const info = await readFile(`/proc/${childPid}/stat`, 'utf8');
+        state = info.slice(info.lastIndexOf(')') + 2).split(' ')[0]!;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        state = 'gone';
+      }
+      if (state === 'gone' || state === 'Z') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    } while (performance.now() < deadline);
+    assert.ok(state === 'gone' || state === 'Z', `descendant remained alive: ${state}`);
+  } finally {
+    if (childPid !== undefined && Number.isInteger(childPid) && childPid > 1) {
+      try { process.kill(childPid, 'SIGKILL'); } catch { /* already reaped */ }
+    }
+  }
+});
