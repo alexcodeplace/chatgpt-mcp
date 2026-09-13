@@ -101,3 +101,16 @@ The guarded rollback restores original profiles and service files if cutover fai
 The implementation includes process fault tests, persistent-job tests, permission/conflict tests, executable recovery state-machine tests and deployment rollback/manifest tests. A real VM candidate also exercised a running systemd job across a backend restart and cancellation. These are targeted fault tests, not evidence of a multi-day soak or universal freedom from upstream interruptions.
 
 See `DESKTOP-UPDATE.md` for a local desktop-agent handoff. The service deployment and recovery scripts require Linux, Python 3, flock, and systemd user services. The pinned tunnel downloader includes macOS and Windows binaries, but that does not make the Linux service rollout portable to those operating systems.
+
+
+## Managed Overdeck deployments
+
+For the owner's host and VM, Overdeck is the deployment authority. Its pinned
+shared release is applied to the existing connector identities, not bootstrapped
+as a second MCP. The common release helper accepts `--profile-unit PROFILE=UNIT.service`
+and `--previous-backend-unit UNIT.service` so it can preserve the actual
+`overdeck-mcp-tunnel.service` host name as well as the VM's existing profile units.
+The selected mapping is persisted into rollback and recovery records. Omitted
+mappings retain the original command-line behavior. These flags do not choose a
+system-scope manager, copy credentials, change capabilities, or imply that an
+unrelated offline connector belongs to this deployment.
