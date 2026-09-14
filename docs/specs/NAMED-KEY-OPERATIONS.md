@@ -1,6 +1,6 @@
 # Named-key operations: deck-kmgr consumer contract
 
-Status: DESIGN ONLY, September 13, 2026. No new MCP tools, key manager, owner-decision workflow, storage migration or runtime configuration is shipped by this document.
+Status: OPTIONAL CONSUMER IMPLEMENTED, September 14, 2026. The four agent tools are disabled by default. No key store, owner-enrollment UI, storage migration, or live endpoint activation is included in this consumer change.
 
 ## Canonical authority
 
@@ -21,7 +21,7 @@ The same immutable request and protected broker transition serve the Overdeck bu
 
 The canonical Overdeck spec defines the four commands' precise scope and denial precedence. A message ID is not a request ID. An agent-visible acknowledgement is not proof of authorization; only broker state is authoritative.
 
-## Proposed opt-in MCP tools
+## Opt-in MCP tools
 
 | Tool | Allowed behavior |
 | --- | --- |
@@ -30,7 +30,7 @@ The canonical Overdeck spec defines the four commands' precise scope and denial 
 | `kmgr.run` | Submit an authenticated, typed operation with validated inputs and idempotency identity; return a result or durable request/job handle promptly |
 | `kmgr.status` | Read the caller-authorized request/job state, review link, and sanitized result without replaying execution |
 
-Tool names are proposed, not present runtime capabilities. Resolve naming and adapter types against the installed MCP conventions before implementation, without changing these authority boundaries.
+These names are registered only when the endpoint is explicitly enrolled. A disabled configuration registers none of them. The client credential is read privately from a file; no provider credential is handled by this process. Configuration fields are the future owner wizard integration seam, not instructions for the owner to edit configuration files.
 
 No agent-facing `get`, `reveal`, `export`, `approve`, `grant`, `import`, `replace`, or key-delete operation. No arbitrary command or destination URL to receive credentials. A generic `fs`, shell, service, or local broker-client path must not provide indirect owner authority.
 
@@ -56,8 +56,10 @@ Botmaster's current generic agent inbox and mutable mirrored message records are
 
 This local integration does not override safety checks made upstream before tool dispatch. Distinguish local permissions, broker decisions, transport failure and platform refusal honestly.
 
-## Consumer acceptance to add with implementation
+## Consumer acceptance
 
 Use synthetic keys and an isolated broker fixture to prove name-only discovery, caller/project isolation, typed operation validation, durable pending responses, status recovery, structured result compatibility, and unchanged legacy capabilities. Verify the MCP process and its logs/env/artifacts never receive key bytes.
 
 Exercise a real installed Overdeck/Botmaster decision through the broker and observe the result through MCP without agent approval authority or owner 'continue'. Test denial, expiration, replay, altered inputs, unavailable broker and forged decision attempts. Those are implementation acceptance requirements, not tests run by this documentation change.
+
+Implementation evidence: client boundaries, disabled-by-default registration, name-only projection, versioned profiles, durable handles, request-scoped status, redirect refusal, bounded responses and credential-free error messages are covered by the consumer tests. The existing full remote gate passed at fe429d1 (run 34831577182). An additional actual MCP protocol round-trip test is included in the following commit. Installed Overdeck/Botmaster owner-flow acceptance is still separate and has not been claimed.

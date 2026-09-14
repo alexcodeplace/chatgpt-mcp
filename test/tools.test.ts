@@ -441,3 +441,25 @@ test('key manager tools are opt-in and expose only agent operations', async () =
     await server.close();
   }
 });
+
+
+test('kmgr.list returns a schema-valid name-only result through the MCP protocol', async (t) => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'kmgr-mcp-roundtrip-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = join(root, 'client');
+  await writeFile(tokenFile, 'synthetic-mcp-client-credential', { mode: 0o600 });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ keys: [{ name: 'synthetic.app.api', secretFile: 'must-not-be-forwarded' }] })) as typeof fetch;
+  try {
+    const { client, server } = await harness({ keyManager: { enabled: true, url: 'https://broker.example', tokenFile } });
+    try {
+      const response = await client.callTool({ name: 'kmgr.list', arguments: { project: 'app' } });
+      assert.equal(response.isError, undefined);
+      assert.deepEqual(response.structuredContent, { keys: [{ name: 'synthetic.app.api' }] });
+      assert.equal(JSON.stringify(response).includes('must-not-be-forwarded'), false);
+    } finally { await client.close(); await server.close(); }
+  } finally { globalThis.fetch = previousFetch; }
+});
