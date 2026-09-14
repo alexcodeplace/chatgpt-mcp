@@ -5,6 +5,105 @@
 **Runtime:** Node.js 22+, TypeScript, ESM  
 **Primary deployment:** private/local computer reachable from ChatGPT through an MCP connection/tunnel
 
+## Human-facing experience and Inspect (owner-approved 2026-09-14)
+
+This maintained specification adopts the interaction principles in the
+[Spargax experience/Inspect contract](https://github.com/alexcodeplace/vibeclub/blob/0bd25d33ea614ebcb58b23f33abe25483e2fd634/docs/specs/spargaxos-product.md#experience-and-inspect-contract)
+for product-owned human onboarding, settings and graphical management integrations.
+This is not a new server UI requirement, protocol session, autonomous planner or
+interactive per-tool approval layer. The new presentation behavior is required
+but implementation and runtime acceptance are **OPEN**.
+
+**MCP-UX01.** First human-facing product onboarding asks Choose your experience:
+Regular / Pro with equal prominence, no preselection, guided versus configurable
+setup descriptions, and You can change this anytime in Settings > Experience.
+It precedes product account/connection/configuration steps. Pro gets supported
+configuration from the beginning, not after a Regular wizard. Store only the
+non-secret human presentation preference in its owning installer/management host;
+never create implicit MCP client/session state. Noninteractive installation and
+machine API calls remain noninteractive, with stable explicit inputs and no new
+mandatory UI/account dependency. An integrated surface may inherit an explicitly
+chosen host mode; standalone interactive onboarding asks when no choice exists.
+
+**MCP-UX02.** Settings > Experience changes the human interface and help, not
+capability grants, endpoint bindings, credential access, command policy, admission
+limits, routing, tunnel credentials or a running job/service. Retain drafts and
+hidden advanced values; save only deliberately changed settings through the existing
+validated configuration authority. Regular and Pro both disclose the actual granted
+scope and consequences before a deliberate configuration change. In particular,
+the documented broad quick-install configuration must not be called least-privilege
+or selected merely because the user chooses Pro. The chosen experience applies to
+setup errors, connection verification, maintenance and recovery as well as settings.
+
+### MCP human settings visibility
+
+These rules classify an existing human control or a supported future management
+integration, not permission to invent flags, endpoints or unimplemented capabilities.
+Pro-only means omitted from Regular editable UI, with a read-only effective summary
+and explicit Edit in Pro navigation from settings search/deep links. Existing
+owner-authorized CLI/configuration mechanisms remain usable in either mode.
+
+| ID | Regular / common | Pro-only supported configuration |
+| --- | --- | --- |
+| MCP-S01 Experience / presentation | First choice, mode setting, supported locale/accessibility/help and accurate connection state. | Technical-detail/density preference if supported; no protocol semantics change. |
+| MCP-S02 Connection / installation | Guided supported setup, scope review, required secure input, explicit connection test, status and safe update/rollback. | Existing transport/endpoint/tunnel/profile configuration fields. Mode alone changes none of them. |
+| MCP-S03 Capability grants | Actual effective scope, risk/consequence explanation and existing guided permission choices or repair. | Detailed allowed roots, executables, services, apps and display grants using the existing validated schema; no bypass or secret reveal. |
+| MCP-S04 Execution / limits | Job status, overload explanation, existing authorized cancel and bounded recovery. | Supported command policies, deadlines, concurrency, admission and remote routing configuration. Inspector never executes a probe job. |
+| MCP-S05 Credentials / named-key operations | Existing protected enrollment/reference status and owner-owned decision workflow where supported. | Supported reference/adapter configuration; neither mode adds approval authority or replaces the existing broker. |
+| MCP-S06 Diagnostics / lifecycle | Safe management diagnostics copy/export, version/health, actual update result and required recovery. | Supported verbosity/retention/backend settings. Existing tool-output contract below is unchanged. |
+
+### MCP inspectable management objects
+
+In an eligible graphical management surface, right-click > Inspect, More actions >
+Inspect, Shift+F10/Context Menu key and a visible touch menu open the same read-only
+Summary / Details / Evidence panel. The native context menu remains on unrelated
+page content, selected text, links, code and editable/secret fields. Opening Inspect
+does not launch another tool, shell, test, job, tunnel or service operation.
+
+| ID / eligible item | Safe details and evidence |
+| --- | --- |
+| MCP-I01 Connection / backend / tunnel status | Safe endpoint/profile identity without credential-bearing URL parts, runtime/protocol version, declared capabilities, observation time and actual readiness/error. Existing status owner only. |
+| MCP-I02 Capability / effective policy row | Stable tool/rule identity, allowed scope, configured limits, precedence and source/version from existing parsed configuration. No raw secret environment or unrelated filesystem inspection. |
+| MCP-I03 Durable job / operation receipt | Opaque job/operation identity, authorized lifecycle/result, bounded timings, ownership, transport/output limits and safe error code. Raw stdout, file contents, arguments or tool outputs are not automatically copied into the inspector. |
+| MCP-I04 Release / install / update receipt | Candidate/active identity, owned paths/resources, verification/rollback evidence and actual result/warnings from the existing lifecycle owner. No deployment from Inspect. |
+| MCP-I05 Health / diagnostic / error item | Component/request identity, safe status/failure reason, timestamps/freshness and related authorized objects; no whole-process environment, transcript or credential dump. |
+| MCP-I06 Named-key reference / request status | Non-secret name/reference, request identity, pending/approved/denied/expired/execution state and permitted owner-review destination, only through the existing broker adapter. No key value, owner authentication material or approval action. |
+
+The management host obtains an allowlisted, authorized metadata projection from the
+existing owner. It must not call a raw data-bearing tool simply to serialize its
+entire result into the drawer. Handle denied/stale/unavailable/deleted/late data and
+clear inaccessible caches on identity changes. Copy summary, safe field copies and
+an explicit inspection-report export require a user action, inclusion preview and
+safe output; no automatic upload. Related links reauthorize and navigate to existing
+operations rather than mutate from the panel. Keep reads cancellable and bounded.
+
+**MCP-UX03. Verbatim-output boundary.** These inspector projections are a distinct
+human management view, not a filter around `fs.read`, `shell.exec`, durable job
+output or any other existing MCP result. They do not restore shared output redaction,
+block authorized credential use or change the Verbatim tool-output contract below.
+The broker's named-key policy and owner decision UI remain separate authorities.
+Never mutate an existing result schema to make Regular and Pro look different.
+
+**MCP-A01.** Prove first-choice setup, restart/inheritance/override, settings changes
+and hidden-value/draft preservation while a job runs. Test both modes against all
+MCP-S rows; noninteractive install/API behavior and effective grants remain unchanged.
+
+**MCP-A02.** Exercise all MCP-I items in the hosting GUI with mouse, keyboard and
+touch, native-menu preservation, accessible panel/focus, stale/denied/late data,
+safe copy/export and no tool execution. Prove credential values do not enter the
+metadata projection while existing authorized verbatim tool-output regression
+fixtures still pass without censorship. No new transcript/log collection.
+
+**MCP-A03.** Record each requirement's exact code/release, host/platform/locale,
+evidence and gap. Audits repair implementation instead of weakening this maintained
+spec or reclassifying missing UI as complete. Current runtime/installation tests do
+not prove this new human-interface scope without the mode/Inspect journeys.
+
+Shared-contract adoption is pinned to reviewed revision `0bd25d33ea614ebcb58b23f33abe25483e2fd634`.
+The maintained source is `alexcodeplace/vibeclub:docs/specs/spargaxos-product.md`.
+When that contract changes, review and update this adoption and the affected local
+matrices together; do not silently revert to older mockups or infer new acceptance.
+
 ## 1. Purpose
 
 `chatgpt-mcp` is a thin MCP server that gives ChatGPT a controlled, typed interface for taking actions on a computer.

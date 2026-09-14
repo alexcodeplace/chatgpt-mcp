@@ -1,5 +1,13 @@
 # chatgpt-mcp
 
+## Human-interface specification authority
+
+The owner-approved [Regular/Pro and Inspect requirements](SPEC.md#human-facing-experience-and-inspect-owner-approved-2026-09-14)
+define human onboarding and management presentation. They are not yet advertised
+as implemented by this documentation change. Machine tool contracts, configured
+grants, verbatim output and existing secret-broker policy are unchanged. No new
+mandatory server GUI or interactive tool-approval layer is introduced.
+
 A stateless MCP server that exposes explicitly configured capabilities on a Linux computer to ChatGPT or any compatible MCP client.
 
 ```text
