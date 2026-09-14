@@ -177,6 +177,15 @@ class DeploymentTests(unittest.TestCase):
             deploy.wait_idle('http://127.0.0.1:8080')
             self.assertEqual(request.call_count, 3)
 
+    def test_drain_timeout_is_operator_configurable(self):
+        sample = 'dispatcher_worker_pool_occupancy 1\ncommands_queue_length 0\n'
+        with mock.patch.object(deploy, 'request', return_value=sample) as request, \
+             mock.patch.object(deploy.time, 'sleep'), \
+             mock.patch.object(deploy.time, 'monotonic', side_effect=[0, 0, 11]):
+            with self.assertRaisesRegex(RuntimeError, 'tunnel did not drain'):
+                deploy.wait_idle('http://127.0.0.1:8080', timeout=10)
+            self.assertEqual(request.call_count, 1)
+
     def test_ready_without_a_fresh_poll_is_not_recovery(self):
         samples = ['commands_poll_last_successful_timestamp_seconds 100\n',
                    'commands_poll_last_successful_timestamp_seconds 995\n', 'ready']

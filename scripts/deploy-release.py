@@ -420,10 +420,15 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
     except Exception:
         systemctl('disable', '--now', unit, check=False)
         raise
+    drain_timeout = getattr(args, 'drain_timeout_seconds', 90)
+    rollout_timeout = getattr(args, 'rollout_timeout_seconds', 300)
+    if drain_timeout <= 0 or rollout_timeout <= 0:
+        raise ValueError('deployment timeouts must be positive seconds')
     plan = {'directory': str(directory), 'lockPath': str(lock_path), 'backendUnit': unit, 'revision': revision, 'files': [], 'touchedProfiles': [], 'enabledLegacyTimers': [],
             'previousBackendUnit': None if bootstrap else previous_unit, 'previousBackendWasEnabled': False if bootstrap else systemctl('is-enabled', previous_unit, check=False).returncode == 0,
             'recoveryWasEnabled': systemctl('is-enabled', 'chatgpt-mcp-recovery.timer', check=False).returncode == 0,
-            'newProfiles': [p['name'] for p in profiles] if bootstrap else [], 'tunnelUnits': mappings}
+            'newProfiles': [p['name'] for p in profiles] if bootstrap else [], 'tunnelUnits': mappings,
+            'drainTimeoutSeconds': drain_timeout, 'rolloutTimeoutSeconds': rollout_timeout}
     plan_path = directory / 'plan.json'
     atomic_json(plan_path, plan)
     guard = 'chatgpt-mcp-rollback-' + revision[:12]
@@ -433,7 +438,7 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
         def deadline(_signum, _frame):
             raise TimeoutError('rollout deadline reached')
         signal.signal(signal.SIGALRM, deadline)
-        signal.alarm(300)
+        signal.alarm(rollout_timeout)
         with open(lock_path, 'a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             for profile in ([] if bootstrap else profiles):
@@ -459,7 +464,7 @@ exec "$TUNNEL_CLIENT_BIN" run --profile "$CHATGPT_MCP_PROFILE"
                                  'UnsetEnvironment=CONTROL_PLANE_TUNNEL_ID TUNNEL_CLIENT_CONFIG TUNNEL_CLIENT_PROFILE_FILE TUNNEL_CLIENT_PROFILE MCP_SERVER_URL MCP_COMMAND HEALTH_LISTEN_ADDR MCP_EXTRA_HEADERS MCP_DISCOVERY_EXTRA_HEADERS',
                                  '[Install]', 'WantedBy=default.target']
                 else:
-                    wait_idle(profile['healthUrl'])
+                    wait_idle(profile['healthUrl'], drain_timeout)
                     if path.read_text() != profile['original']:
                         raise RuntimeError('profile changed during staging; refusing to overwrite it')
                     changed, count = re.subn(r'(?m)^(\s*url:\s*[\"\']?)http://(?:127\.0\.0\.1|localhost):[0-9]+/mcp([\"\']?\s*)$', r'\g<1>http://127.0.0.1:' + str(port) + r'/mcp\2', profile['original'])
@@ -555,6 +560,8 @@ if __name__ == '__main__':
     item.add_argument('--health-port', type=int, help='Bootstrap-only unoccupied loopback health port')
     item.add_argument('--canary-directory', type=pathlib.Path)
     item.add_argument('--working-directory', type=pathlib.Path, help='Defaults to the current backend working directory, not its configuration directory')
+    item.add_argument('--drain-timeout-seconds', type=int, default=90, help='Maximum seconds to wait for each existing tunnel profile to reach zero workers and queue before cutover')
+    item.add_argument('--rollout-timeout-seconds', type=int, default=300, help='Overall cutover deadline after candidate staging; must cover all per-profile drain and fresh-poll waits')
     item = sub.add_parser('rollback')
     item.add_argument('--plan', type=pathlib.Path, required=True)
     args = parser.parse_args()
