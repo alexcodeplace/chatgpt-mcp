@@ -251,7 +251,7 @@ Execute one local command and wait for completion.
 
 Input:
 
-- `command` — executable name;
+- `command` — executable name or path;
 - `args` — argument array;
 - optional `cwd`;
 - optional `env` additions;
@@ -385,7 +385,7 @@ The filesystem policy implementation is a single reusable module used by every f
 
 Requirements:
 
-- executable allow-list is checked before spawn;
+- executable allow-list is checked before spawn; `*` accepts names and paths, while a restricted list matches the exact requested name/path (never a path's basename);
 - `cwd`, when provided, must satisfy configured filesystem/shell roots;
 - execution timeout is bounded by server configuration;
 - stdout/stderr are bounded to prevent unbounded memory use;

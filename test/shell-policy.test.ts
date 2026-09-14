@@ -29,8 +29,26 @@ test('unlisted executable rejects', () => {
   });
 });
 
-test('paths are not accepted as executable names', () => {
-  assert.throws(() => authorizeCommand('/bin/git', [], { ...policy, allowedCommands: ['*'] }));
+test('wildcard and exact path grants allow executable paths without expanding name-only grants', () => {
+  for (const command of ['/usr/bin/git', './scripts/inspect', '../tools/inspect']) {
+    assert.doesNotThrow(() => authorizeCommand(command, [], wildcardPolicy));
+    assert.doesNotThrow(() => authorizeCommand(command, [], { ...policy, allowedCommands: [command] }));
+    assert.throws(() => authorizeCommand(command, [], policy), isCommandNotAllowed);
+  }
+  for (const command of ['', 'git\0status']) {
+    assert.throws(() => authorizeCommand(command, [], wildcardPolicy), isCommandNotAllowed);
+  }
+});
+
+test('executable paths retain explicit agent, privilege and host-display blocks', () => {
+  for (const command of ['/usr/bin/codex', './claudex', '/usr/bin/sudo', './pkexec']) {
+    assert.throws(() => authorizeCommand(command, [], wildcardPolicy), isCommandNotAllowed);
+  }
+  for (const command of ['/usr/bin/grim', './scrot']) {
+    assert.throws(() => authorizeHostDisplaySafeInvocation(command, [], false), isCommandNotAllowed);
+  }
+  assert.throws(() => authorizeHostDisplaySafeInvocation('/bin/bash', ['-c', 'grim /tmp/image.png'], false), isCommandNotAllowed);
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('/usr/bin/git', ['status'], false));
 });
 
 test('explicit wildcard allows executable names', () => {

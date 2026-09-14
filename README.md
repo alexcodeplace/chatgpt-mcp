@@ -382,6 +382,8 @@ Crucially, enabling this policy does **not** enable systemd isolation, sudo, `de
 
 Routine `shell.exec` is also authentication-noninteractive: direct `sudo`, `su`, and `pkexec` are refused, SSH runs in batch mode, and credential/askpass UI is disabled. Explicit `deck-sudo` remains available when the deployment intentionally provides it. This prevents agents from surfacing root/password dialogs while preserving owner-authorized noninteractive privilege paths.
 
+With `shell.allowedCommands: ["*"]`, executable names and paths such as `git`, `/usr/bin/git`, and `./scripts/inspect` are accepted. Explicit command policies, filesystem blocklist rules, and capability-specific restrictions still apply. Restricted allow-lists match the exact requested name or path. A pre-dispatch refusal by the connected AI platform is outside the MCP process; inspect the actual tool error before attributing it to MCP policy.
+
 This guard deliberately does not claim to stop arbitrary language runtimes or custom wrappers from mutating the filesystem. Use normal OS permissions/snapshots for a hard security boundary.
 
 

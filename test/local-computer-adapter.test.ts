@@ -221,6 +221,25 @@ test('shell exec returns stdout and non-zero exits as normal results', async () 
   }
 });
 
+test('wildcard executes an absolute binary while absolute mutation commands still respect the blocklist', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-executable-path-'));
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { roots: [root], blocklist: [{ path: root, mode: 'freeze-children' }] },
+    shell: { enabled: true, allowedCommands: ['*'] },
+  }));
+  try {
+    const result = await adapter.exec({ command: process.execPath, args: ['-e', 'process.stdout.write("ordinary output")'], cwd: root });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, 'ordinary output');
+    await assert.rejects(
+      () => adapter.exec({ command: '/bin/mkdir', args: [join(root, 'blocked-child')], cwd: root }),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('shell timeout terminates the child and reports timedOut', async () => {
   const { root, adapter } = await fixture();
   try {
