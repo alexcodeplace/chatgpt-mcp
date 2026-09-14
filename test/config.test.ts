@@ -284,3 +284,9 @@ test('local systemd isolation is explicitly opt-in and resource bounded', () => 
   assert.throws(() => parseConfig({ execution: { localIsolation: { tasksMax: 1 } } }));
   assert.throws(() => parseConfig({ execution: { localIsolation: { cpuWeight: 0 } } }));
 });
+
+
+test('legacy outputRedaction config is ignored and absent from parsed runtime config', () => {
+  const config = parseConfig({ outputRedaction: { files: ['/tmp/secret'], directories: ['/tmp/private'] } });
+  assert.equal('outputRedaction' in config, false);
+});

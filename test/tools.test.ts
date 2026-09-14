@@ -421,3 +421,37 @@ test('filesystem blocklist does not disable unrelated GUI browser or input capab
     await server.close();
   }
 });
+
+
+test('credential-looking file and command output pass through unchanged', async () => {
+  const payload = 'api_key=sk-test-passthrough-1234567890';
+  const adapter = fakeAdapter();
+  adapter.readFile = async () => payload;
+  adapter.exec = async () => ({ exitCode: 0, stdout: payload, stderr: `stderr:${payload}`, durationMs: 1, timedOut: false });
+  const { client, server } = await harness({
+    filesystem: { read: true, roots: ['/tmp'] },
+    shell: { enabled: true, allowedCommands: ['node'] },
+  }, adapter);
+  try {
+    const file = await client.callTool({ name: 'fs.read', arguments: { path: '/tmp/credential.txt' } });
+    assert.equal((file.structuredContent as { content?: string }).content, payload);
+    const command = await client.callTool({ name: 'shell.exec', arguments: { command: 'node', args: [] } });
+    assert.equal((command.structuredContent as { stdout?: string }).stdout, payload);
+    assert.equal((command.structuredContent as { stderr?: string }).stderr, `stderr:${payload}`);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('system.info does not advertise an output-redaction layer', async () => {
+  const { client, server } = await harness({});
+  try {
+    const result = await client.callTool({ name: 'system.info', arguments: {} });
+    const runtime = (result.structuredContent as { runtime?: Record<string, unknown> }).runtime ?? {};
+    assert.equal('outputRedaction' in runtime, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

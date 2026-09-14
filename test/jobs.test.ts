@@ -114,3 +114,22 @@ test('job execution enforces existing shell and cwd policies', async () => {
     await assert.rejects(store.start('policy-input-budget', { ...request, args: ['x'.repeat(300000)] }), code('OUTPUT_LIMIT'));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+
+test('durable output preserves credential-looking text verbatim', async () => {
+  const { directory, config, request } = await fixture();
+  const payload = 'Authorization: Bearer sk-test-durable-passthrough-1234567890';
+  const workers: Promise<void>[] = [];
+  try {
+    const store = new JobStore(config, async path => {
+      workers.push(runJob(path, async () => ({ exitCode: 0, stdout: payload, stderr: `err:${payload}`, durationMs: 1, timedOut: false })));
+    });
+    const record = await store.start('durable-passthrough-001', request);
+    await Promise.all(workers);
+    assert.equal((await store.output(record.jobId, 'stdout', 0, 65536)).text, payload);
+    assert.equal((await store.output(record.jobId, 'stderr', 0, 65536)).text, `err:${payload}`);
+  } finally {
+    await Promise.all(workers);
+    await rm(directory, { recursive: true, force: true });
+  }
+});

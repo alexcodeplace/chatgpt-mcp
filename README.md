@@ -364,42 +364,13 @@ GET /metrics  JSON limits, active/queued counts, peaks, and overload/cancellatio
 
 The installer also applies conservative systemd containment to the shared backend (`TimeoutStopSec=5`, `TasksMax=512`, `LimitNOFILE=65536`, `MemoryHigh=6G`, `MemoryMax=9G`, `CPUWeight=80`). HTTP shutdown gives in-flight connections two seconds to drain before they are force-closed, preventing a restart from hanging behind a large request backlog. These are last-resort host guardrails; normal overload should be handled by admission control first. The tunnel watchdog intentionally checks `/healthz`, not `/readyz`, so a healthy busy server is never restarted merely for being saturated.
 
-## Credentials: use them without displaying them
+## Credentials and command output
 
-Authorized commands may use local API keys, deployment tokens, and other credentials.
-The MCP does not reject a command because it uses a credential. Every tool result
-passes through default-on output redaction: recognized secret text becomes
-`[SECRET_REDACTED]`, while the actual child process receives the original value.
-The command, credential file, environment, exit code and existing permissions are
-not rewritten by redaction.
+Authorized commands may use local API keys, deployment tokens, and other credentials under the same filesystem, shell, and environment grants as any other data. The MCP does not apply secret-value output redaction. `fs.read`, `shell.exec`, tool errors, process metadata, URLs, and durable command output are returned as produced by the authorized adapter, subject only to the existing capability, byte, transport, and retention limits.
 
-Agents should reference a local credential path and load its value inside the
-command process. Do not read a key into chat, paste it into a tool argument, or ask
-the owner to relay it. Existing CLI credential stores and environment-based
-authentication continue to work. `[SECRET_REDACTED]` means the display was sanitized,
-not that the credential is missing or the command was denied.
+Durable job requests remain private on disk while pending: request files use restrictive permissions and are deleted by the worker before execution. Durable stdout and stderr are stored in the private job ledger and returned verbatim through `exec.output` until retention expires. Operators should therefore grant only the filesystem roots, commands, environment access, and services they intend the connected client to observe.
 
-The boundary covers stdout, stderr, structured/text results, errors and direct
-credential-file reads. It discovers sensitive environment values, common local
-credential files, project `.secrets` / `.env` / `.dev.vars` files near the working
-or read-file directory, and credential paths referenced by requests. Values are
-learned before and after the operation to protect rotation and deletion. For an
-unusually named source outside those conventions, the owner can list its path in
-`outputRedaction.files` or a private directory in `outputRedaction.directories`.
-These options contain paths only, not credential values; ordinary use needs no
-additional configuration. Discovery is bounded and reads files as data, never as
-shell code.
-
-Durable-job output is sanitized before being persisted or paginated. Output from
-older workers without that guarantee is displayed as the marker, with job state
-and idempotency preserved. Existing read-size, filesystem, shell and display grants
-remain in force. `system.info.runtime.outputRedaction` reports the active policy.
-
-This prevents accidental text disclosure, not arbitrary hostile transformations or
-keys visible inside screenshots. Unknown opaque values in undiscoverable locations
-cannot reliably be recognized. It also cannot disable OpenAI safety checks that
-reject a request before it reaches this server. An upstream refusal and a local
-MCP permission error are different failures; do not misreport one as the other.
+This behavior is deliberately transparent: credential-looking strings are not rewritten, credential files are not specially censored, and `system.info.runtime` does not advertise a redaction layer. Upstream platform safety controls, OS permissions, filesystem blocklists, shell policy, and MCP capability grants remain separate controls.
 
 ## Filesystem blocklist
 

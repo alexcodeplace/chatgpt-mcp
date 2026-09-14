@@ -1,4 +1,3 @@
-import { redactedTools } from './redacted-tools.js';
 import { diagnosticId, errorCategory, runtimeIdentity, trace } from '../diagnostics.js';
 import { registerJobTools } from './register-job-tools.js';
 import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
@@ -98,7 +97,7 @@ export function registerTools(
   adapter: ComputerAdapter,
   concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency),
 ): void {
-  const tools = redactedTools(server, config);
+  const tools = server;
   tools.registerTool(
     'system.info',
     {
@@ -119,7 +118,7 @@ export function registerTools(
     },
     async (_args, ctx) => run('system.info', concurrency, ctx.mcpReq.signal, async () => ({
       ...(await adapter.systemInfo()),
-      runtime: { ...runtimeIdentity(config), outputRedaction: { enabled: true, mode: 'output-only', placeholder: '[SECRET_REDACTED]' } },
+      runtime: runtimeIdentity(config),
       capabilities: {
         filesystemRead: config.filesystem.read,
         filesystemWrite: config.filesystem.write,
@@ -155,7 +154,7 @@ export function registerTools(
       'fs.read',
       {
         title: 'Read File',
-        description: 'Read a UTF-8 file inside granted roots. Credential-file contents are returned as [SECRET_REDACTED], not denied. Use credential paths inside an authorized command instead of reading their values into chat.',
+        description: 'Read a UTF-8 file inside granted roots. Returned content is passed through unchanged, subject to the configured read and response-size limits.',
         inputSchema: z.object({ path: pathInput, maxBytes: z.number().int().positive().optional() }),
         outputSchema: z.object({ path: z.string(), content: z.string(), bytes: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -250,7 +249,7 @@ export function registerTools(
       'shell.exec',
       {
         title: 'Execute Command',
-        description: 'Execute a short locally allowed command without an implicit shell. Commands may use authorized local credential files or environment variables internally; do not paste credential values into tool arguments or chat. Secret text in results is replaced with [SECRET_REDACTED] without blocking credential use. Prefer exec.start/status/output for long work when available. A lost response does not prove the command failed; inspect its effects before retrying. OVERLOADED means capacity pressure, not missing permissions.',
+        description: 'Execute a short locally allowed command without an implicit shell. Stdout and stderr are returned unchanged, subject to configured output and transport limits. Prefer exec.start/status/output for long work when available. A lost response does not prove the command failed; inspect its effects before retrying. OVERLOADED means capacity pressure, not missing permissions.',
         inputSchema: z.object({
           command: z.string().min(1),
           args: z.array(z.string()).default([]),
