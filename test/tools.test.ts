@@ -455,3 +455,44 @@ test('system.info does not advertise an output-redaction layer', async () => {
     await server.close();
   }
 });
+
+test('key manager tools are opt-in and expose only agent operations', async () => {
+  const { client, server } = await harness({
+    keyManager: { enabled: true, tokenFile: '/tmp/kmgr-test-token' },
+  });
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name).sort();
+    assert.deepEqual(names, ['kmgr.list', 'kmgr.profiles', 'kmgr.run', 'kmgr.status', 'system.info']);
+    const info = await client.callTool({ name: 'system.info', arguments: {} });
+    const capabilities = (info.structuredContent as { capabilities?: Record<string, boolean> } | undefined)?.capabilities;
+    assert.equal(capabilities?.keyManager, true);
+    for (const forbidden of ['kmgr.get', 'kmgr.reveal', 'kmgr.import', 'kmgr.approve', 'kmgr.grant', 'kmgr.delete']) {
+      assert.equal(names.includes(forbidden), false);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+
+test('kmgr.list returns a schema-valid name-only result through the MCP protocol', async (t) => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'kmgr-mcp-roundtrip-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = join(root, 'client');
+  await writeFile(tokenFile, 'synthetic-mcp-client-credential', { mode: 0o600 });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ keys: [{ name: 'synthetic.app.api', secretFile: 'must-not-be-forwarded' }] })) as typeof fetch;
+  try {
+    const { client, server } = await harness({ keyManager: { enabled: true, url: 'https://broker.example', tokenFile } });
+    try {
+      const response = await client.callTool({ name: 'kmgr.list', arguments: { project: 'app' } });
+      assert.equal(response.isError, undefined);
+      assert.deepEqual(response.structuredContent, { keys: [{ name: 'synthetic.app.api' }] });
+      assert.equal(JSON.stringify(response).includes('must-not-be-forwarded'), false);
+    } finally { await client.close(); await server.close(); }
+  } finally { globalThis.fetch = previousFetch; }
+});

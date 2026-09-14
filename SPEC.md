@@ -602,3 +602,17 @@ Owner requirement: the MCP must not rewrite successful tool results merely becau
 5. Runtime metadata must not claim that output redaction is active. Obsolete `outputRedaction` configuration is not part of the parsed public configuration contract. Existing configuration files containing unknown legacy keys may continue to parse according to the schema's unknown-key behavior, but those keys have no runtime effect.
 6. Removing output redaction does not broaden capability grants or disable upstream platform safety controls, OS permissions, filesystem blocklists, shell policy, service allowlists, transport limits, or durable-job privacy permissions.
 7. Regression acceptance includes credential-looking file content, stdout, stderr, structured payloads, and durable output surviving the full MCP boundary byte-for-byte while existing authorization and size limits still pass their prior tests.
+
+## Optional named-key operation adapter
+
+The [named-key consumer contract](docs/specs/NAMED-KEY-OPERATIONS.md) defines
+the optional deck-kmgr integration. Overdeck owns credential custody, enrollment,
+decision UI, and the authenticated Botmaster reply workflow. This MCP exposes
+only name discovery, supported operation profiles, typed operation submission,
+and durable status. It never obtains provider credentials or owner-decision
+authority. The integration is disabled until explicitly enrolled.
+
+This is independent of the verbatim-output contract above: ordinary filesystem
+and shell tools are not modified or censored by the key-manager adapter. Its
+name-only API projects a defined response schema; it is not a replacement
+redaction wrapper around other tools.

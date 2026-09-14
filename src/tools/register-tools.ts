@@ -6,6 +6,7 @@ import type { ComputerAdapter } from '../adapter/computer-adapter.js';
 import type { ChatGptMcpConfig } from '../config.js';
 import { ConcurrencyController, type AdmissionClass } from '../concurrency.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
+import { KeyManagerClient, KeyManagerClientError } from '../key-manager/client.js';
 
 const pathInput = z.string().min(1);
 const signalSchema = z.enum([
@@ -50,6 +51,17 @@ function failure(error: unknown, operation: string): CallToolResult {
     ? { code: error.code, message: error.message, operation: error.operation, ...(error.details ? { details: error.details } : {}) }
     : { code: 'OS_ERROR', message: 'Unexpected computer adapter failure.', operation };
   return { content: [{ type: 'text', text: JSON.stringify({ error: { ...body, category: errorCategory(body.code), diagnosticId: diagnosticId(), retryable: body.code === 'OVERLOADED' } }) }], isError: true };
+}
+
+
+function mapKeyManagerError(error: unknown, operation: string): unknown {
+  if (!(error instanceof KeyManagerClientError)) return error;
+  if (error.status === 429) return adapterError('OVERLOADED', operation, error.message);
+  if (/cancelled/i.test(error.message)) return adapterError('CANCELLED', operation, error.message);
+  if (error.status === 404) return adapterError('NOT_FOUND', operation, error.message);
+  if (error.status === 409) return adapterError('CONFLICT', operation, error.message);
+  if (/timed out/i.test(error.message)) return adapterError('TIMEOUT', operation, error.message);
+  return adapterError('OS_ERROR', operation, error.message);
 }
 
 function enforceTransportBudget(result: CallToolResult, operation: string): CallToolResult {
@@ -111,7 +123,7 @@ export function registerTools(
         capabilities: z.object({
           filesystemRead: z.boolean(), filesystemWrite: z.boolean(), filesystemRoots: z.number().int(),
           shell: z.boolean(), processList: z.boolean(), processKill: z.boolean(), service: z.boolean(),
-          application: z.boolean(), browser: z.boolean(), hostDisplayAccess: z.boolean(), screenCapture: z.boolean(), screenRecording: z.boolean(), input: z.boolean(),
+          application: z.boolean(), browser: z.boolean(), hostDisplayAccess: z.boolean(), screenCapture: z.boolean(), screenRecording: z.boolean(), input: z.boolean(), keyManager: z.boolean(),
         }),
       }),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -133,9 +145,74 @@ export function registerTools(
         screenCapture: config.desktop.hostDisplayAccess && config.desktop.screenCapture,
         screenRecording: config.desktop.hostDisplayAccess && config.desktop.screenRecording && config.filesystem.write && config.filesystem.roots.length > 0,
         input: config.desktop.hostDisplayAccess && config.desktop.input,
+        keyManager: config.keyManager.enabled,
       },
     })),
   );
+
+  if (config.keyManager.enabled) {
+    const tokenFile = config.keyManager.tokenFile;
+    if (!tokenFile) throw new Error('keyManager.tokenFile is required when key manager is enabled');
+    const client = new KeyManagerClient({ url: config.keyManager.url, tokenFile, timeoutMs: config.keyManager.timeoutMs });
+    const kmgrRun = async (operation: string, signal: AbortSignal, fn: () => Promise<Record<string, unknown>>) =>
+      run(operation, concurrency, signal, async () => {
+        try { return await fn(); } catch (error) { throw mapKeyManagerError(error, operation); }
+      });
+
+    tools.registerTool(
+      'kmgr.list',
+      {
+        title: 'List Named Keys',
+        description: 'List only key names authorized for this connector. Values, paths, prefixes and fingerprints are never returned. Use kmgr tools instead of reading credential files.',
+        inputSchema: z.object({ project: z.string().min(1).max(160).optional() }),
+        outputSchema: z.object({ keys: z.array(z.object({ name: z.string() })) }),
+        annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ project }, ctx) => kmgrRun('kmgr.list', ctx.mcpReq.signal, async () => client.list(project, ctx.mcpReq.signal)),
+    );
+
+    tools.registerTool(
+      'kmgr.profiles',
+      {
+        title: 'List Key Operations',
+        description: 'List non-secret operation profiles available for a named key. Knowing a key name does not grant access.',
+        inputSchema: z.object({ keyName: z.string().min(1).max(240) }),
+        outputSchema: z.object({ profiles: z.array(z.object({ id: z.string(), version: z.number().int().positive(), label: z.string(), provider: z.string() })) }),
+        annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ keyName }, ctx) => kmgrRun('kmgr.profiles', ctx.mcpReq.signal, async () => client.profiles(keyName, ctx.mcpReq.signal)),
+    );
+
+    tools.registerTool(
+      'kmgr.run',
+      {
+        title: 'Run Approved Key Operation',
+        description: 'Submit one typed operation using a named key without receiving the credential. If owner approval is needed, returns a durable KMGR request id and Botmaster notification state. Reuse the same idempotencyKey when checking/retrying the same intent.',
+        inputSchema: z.object({
+          project: z.string().min(1).max(160),
+          keyName: z.string().min(1).max(240),
+          profileId: z.string().min(1).max(200),
+          input: z.record(z.string(), z.unknown()),
+          idempotencyKey: z.string().min(1).max(240),
+        }),
+        outputSchema: z.record(z.string(), z.unknown()),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      },
+      async (args, ctx) => kmgrRun('kmgr.run', ctx.mcpReq.signal, async () => client.run(args, ctx.mcpReq.signal)),
+    );
+
+    tools.registerTool(
+      'kmgr.status',
+      {
+        title: 'Key Operation Status',
+        description: 'Read a durable KMGR request or JOB result. This never approves, imports, reveals, rotates or deletes a key.',
+        inputSchema: z.object({ id: z.string().min(1).max(128) }),
+        outputSchema: z.record(z.string(), z.unknown()),
+        annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ id }, ctx) => kmgrRun('kmgr.status', ctx.mcpReq.signal, async () => client.status(id, ctx.mcpReq.signal)),
+    );
+  }
 
   if (config.filesystem.read && config.filesystem.roots.length > 0) {
     tools.registerTool(
