@@ -8,7 +8,7 @@
 ## Human-facing experience and Inspect (owner-approved 2026-09-14)
 
 This maintained specification adopts the interaction principles in the
-[Spargax experience/Inspect contract](https://github.com/alexcodeplace/vibeclub/blob/main/docs/specs/spargaxos-product.md#experience-and-inspect-contract)
+[Spargax experience/Inspect contract](https://github.com/alexcodeplace/vibeclub/blob/0bd25d33ea614ebcb58b23f33abe25483e2fd634/docs/specs/spargaxos-product.md#experience-and-inspect-contract)
 for product-owned human onboarding, settings and graphical management integrations.
 This is not a new server UI requirement, protocol session, autonomous planner or
 interactive per-tool approval layer. The new presentation behavior is required
@@ -98,6 +98,11 @@ fixtures still pass without censorship. No new transcript/log collection.
 evidence and gap. Audits repair implementation instead of weakening this maintained
 spec or reclassifying missing UI as complete. Current runtime/installation tests do
 not prove this new human-interface scope without the mode/Inspect journeys.
+
+Shared-contract adoption is pinned to reviewed revision `0bd25d33ea614ebcb58b23f33abe25483e2fd634`.
+The maintained source is `alexcodeplace/vibeclub:docs/specs/spargaxos-product.md`.
+When that contract changes, review and update this adoption and the affected local
+matrices together; do not silently revert to older mockups or infer new acceptance.
 
 ## 1. Purpose
 
