@@ -1,5 +1,4 @@
 {
-  "outputRedaction": { "files": [], "directories": [] },
   "execution": {
     "defaultBackend": "local",
     "lightweightTimeoutMs": 30000,

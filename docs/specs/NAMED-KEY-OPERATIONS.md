@@ -48,9 +48,9 @@ An approval is not a successful deployment. Expose truthful execution status and
 
 ## Compatibility and trust boundary
 
-The adapter is optional and disabled until explicitly enrolled through Overdeck's owner setup. Existing MCP filesystem, shell, desktop and output-redaction capabilities retain their contracts. This is not a migration that silently disables authorized legacy credential use.
+The adapter is optional and disabled until explicitly enrolled through Overdeck's owner setup. Existing MCP filesystem, shell and desktop capabilities retain their verbatim-output contracts. This is not a migration that silently disables authorized legacy credential use.
 
-Existing output redaction remains defense in depth. The core protection is that the agent/MCP environment never obtains the provider secret and cannot modify the broker, its trusted adapters, its owner UI/receiver, or its grants. Broadly privileged agent environments require a separate protected administrative boundary.
+The shared MCP output-redaction layer was removed on main at 7c38c64 by owner direction. This adapter does not restore it. Named-key protection instead requires that the agent/MCP environment never obtains the provider secret and cannot modify the protected broker, its trusted adapters, owner UI/receiver, or grants. Broadly privileged agent environments require a separate protected administrative boundary.
 
 Botmaster's current generic agent inbox and mutable mirrored message records are not, by themselves, verified owner authorization. Only the protected path defined in the canonical spec may submit a decision. chatgpt-mcp does not implement that Telegram verification or expose a shortcut to it.
 

@@ -36,7 +36,7 @@ Systemd workers run in their own cgroups and survive tunnel and backend restarts
 
 Output is available after completion, in bounded character slices. `offset` and `nextOffset` are UTF-16 character offsets, not byte offsets. Defaults retain output for one day, the operation ledger for seven days, up to 2,048 records and 256 MiB of stored/reserved output. Retention cleanup runs on new submissions. Unknown outcomes remain reserved until explicitly reconciled by an operator. Operation IDs must be globally unique; do not reuse them after retention expires. A full ledger or output budget rejects new work rather than evicting active/unknown operations. Use one active backend owner for a job directory; multi-writer replicas are not supported.
 
-Request arguments and environment are stored in private 0700 directories and 0600 files only until the worker loads them. The worker deletes its request before executing. Worker output is redacted before persistence and pagination, and retained output remains private. Legacy output without the outputRedacted ledger flag is displayed as [SECRET_REDACTED]; its job state and replay protection are unchanged. The durable API uses the same configured shell, path, environment and display policies as synchronous execution.
+Request arguments and environment are stored in private 0700 directories and 0600 files only until the worker loads them. The worker deletes its request before executing. Worker stdout and stderr are persisted verbatim in the private ledger and returned verbatim through pagination until retention expires. The durable API uses the same configured shell, path, environment and display policies as synchronous execution.
 
 ### Existing conversations with a cached tool catalog
 

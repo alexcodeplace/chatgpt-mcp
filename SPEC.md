@@ -591,56 +591,28 @@ A read+write grant on an adapter implementing `replaceFile` exposes `fs.replace(
 
 Recovery is a separate local supervisor with one locked backend owner and independent per-profile states. It checks fresh MCP capabilities and control-plane polling, never restores permissions/configuration automatically, persists restart budgets before actions, and performs no unconditional restart loop. Deployments share that lock, verify an immutable release inventory, exercise a private candidate, arm an independent rollback timer, and preserve the previous backend's running resources. `docs/DESKTOP-UPDATE.md` defines the local-agent rollout procedure and platform limitations.
 
-## Output-only credential protection
+## Verbatim tool-output contract (2026-09-14)
 
-Owner requirement (2026-09-13): authorized commands may consume local credentials
-without revealing their values to an agent or chat. Credential presence is not a
-permission denial. Tool-visible secret text MUST become `[SECRET_REDACTED]`.
+Owner requirement: the MCP must not rewrite successful tool results merely because text resembles a credential. Authorized reads and commands return their adapter-produced data unchanged.
 
-1. Apply one common redaction boundary to all registered tool results, including
-   structured content, textual content, error details, process arguments and URLs.
-   Preserve commands, arguments, environment, file contents on disk, exit status,
-   existing capability grants and authorization checks. Never replace a credential
-   in the child environment with the display marker.
-2. Enable protection by default. Discover sensitive environment values, the MCP
-   bearer token, configured outputRedaction.files/directories, common user credential
-   files, project .secrets/.env/.dev.vars files near the working directory and
-   credential paths referenced by tool arguments. Inspect files as data, never as
-   executable shell. Bound discovery, regular-file reads, memory and recursion.
-3. Learn both before and after execution, retaining pre-operation values through
-   rotations/deletions. Mask recognized provider formats, credential assignments,
-   authentication headers, credential-bearing URLs and common encodings of known
-   values. Return credential-file reads as the marker, not a permission error,
-   including adapter-returned partial contents. Existing read-size and permission errors remain unchanged. Public source files remain readable.
-4. Redact durable output in its worker before persistence and pagination. Mark this
-   format in the ledger. Legacy output without that provenance is displayed as a
-   marker because its former credential context cannot reliably be reconstructed.
-   Job execution, status, cancellation and idempotency are unchanged.
-5. Never serialize discovered values, request payloads or parser exceptions into
-   diagnostics. Redactor failures suppress output, not command execution. Preserve
-   image/audio bytes: text redaction is not screenshot OCR or visual censorship.
-6. The wrapper is accidental-disclosure protection, not a sandbox against hostile
-   same-user programs, arbitrary transformations or deliberately fragmented keys.
-   Unknown opaque values in undiscoverable locations cannot be identified reliably.
-   Do not claim that this local implementation changes upstream OpenAI safety checks.
-7. Regression acceptance includes an actual subprocess consuming a file credential
-   to authenticate to a loopback fixture, unchanged exit codes and side effects,
-   stdout/stderr, split writes, nested/error payloads, partial file reads, rotation,
-   encodings, durable persistence/pagination, legacy output, missing/malformed sources,
-   discovery budgets, benign-output preservation and unchanged existing policies.
+1. No shared output-redaction wrapper is applied to registered tools. Textual and structured results, errors, process arguments, URLs, file contents, stdout, and stderr pass through unchanged, subject to normal schema validation, capability checks, byte limits, and transport limits.
+2. `fs.read` does not classify or censor credential-looking paths or contents. Files remain accessible only inside explicitly granted filesystem roots and under the existing filesystem policy.
+3. `shell.exec` preserves child stdout/stderr exactly as returned by the adapter. Shell authorization, environment policy, runtime/output limits, host-display rules, routing, and isolation behavior are unchanged.
+4. Durable workers persist the adapter result without secret-value transformation. `exec.output` paginates the stored stdout/stderr verbatim, including records created before this revision. Request files remain private and are deleted before execution; ledger/output retention and capacity rules are unchanged.
+5. Runtime metadata must not claim that output redaction is active. Obsolete `outputRedaction` configuration is not part of the parsed public configuration contract. Existing configuration files containing unknown legacy keys may continue to parse according to the schema's unknown-key behavior, but those keys have no runtime effect.
+6. Removing output redaction does not broaden capability grants or disable upstream platform safety controls, OS permissions, filesystem blocklists, shell policy, service allowlists, transport limits, or durable-job privacy permissions.
+7. Regression acceptance includes credential-looking file content, stdout, stderr, structured payloads, and durable output surviving the full MCP boundary byte-for-byte while existing authorization and size limits still pass their prior tests.
 
-Output redaction MUST preserve protocol property names and public schema enums.
-A credential whose value happens to equal a field name must not rename that field.
-Unquoted identifier references in command/source text are not literal credentials;
-credential-file assignments and explicit sensitive fields remain value sources.
-Protocol-collision regressions and a real installed provider check are required.
+## Optional named-key operation adapter
 
-## Planned named-key operation adapter
+The [named-key consumer contract](docs/specs/NAMED-KEY-OPERATIONS.md) defines
+the optional deck-kmgr integration. Overdeck owns credential custody, enrollment,
+decision UI, and the authenticated Botmaster reply workflow. This MCP exposes
+only name discovery, supported operation profiles, typed operation submission,
+and durable status. It never obtains provider credentials or owner-decision
+authority. The integration is disabled until explicitly enrolled.
 
-The owner-directed [named-key consumer contract](docs/specs/NAMED-KEY-OPERATIONS.md)
-records a proposed optional integration with Overdeck's deck-kmgr broker.
-Overdeck owns the canonical product specification, decision UI, key management
-and Botmaster owner-reply workflow. MCP exposes only authorized names, typed
-operation requests and job status, never values or decision/management authority.
-This is a design reference, not an implemented capability or a change to legacy
-shell/filesystem permissions and output redaction.
+This is independent of the verbatim-output contract above: ordinary filesystem
+and shell tools are not modified or censored by the key-manager adapter. Its
+name-only API projects a defined response schema; it is not a replacement
+redaction wrapper around other tools.

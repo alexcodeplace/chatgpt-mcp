@@ -1,4 +1,3 @@
-import { SECRET_REDACTED } from '../security/output-redaction.js';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, readlink, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -27,7 +26,6 @@ export interface JobRecord {
   errorCode?: string;
   resultBytes?: number;
   outputExpired?: boolean;
-  outputRedacted?: boolean;
   cancellationRequested?: boolean;
 }
 export interface JobRequest {
@@ -187,8 +185,7 @@ export class JobStore {
     if (record.outputExpired) throw adapterError('NOT_FOUND', 'exec.output', 'Job output expired; the operation identifier remains reserved until ledger retention expires.');
     if (!TERMINAL.has(record.state)) return { jobId, state: record.state, stream, offset, nextOffset: offset, text: '', complete: false };
     const stored = await readFile(join(this.path(jobId), `${stream}.txt`), 'utf8');
-    // Legacy workers lacked credential context protection. Do not reveal their raw logs.
-    const text = record.outputRedacted ? stored : (stored.length ? SECRET_REDACTED : '');
+    const text = stored;
     const chunk = text.slice(offset, offset + maxCharacters);
     return { jobId, state: record.state, stream, offset, nextOffset: offset + chunk.length, text: chunk, complete: offset + chunk.length >= text.length };
   }

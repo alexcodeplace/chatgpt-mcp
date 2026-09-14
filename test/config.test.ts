@@ -286,6 +286,11 @@ test('local systemd isolation is explicitly opt-in and resource bounded', () => 
 });
 
 
+test('legacy outputRedaction config is ignored and absent from parsed runtime config', () => {
+  const config = parseConfig({ outputRedaction: { files: ['/tmp/secret'], directories: ['/tmp/private'] } });
+  assert.equal('outputRedaction' in config, false);
+});
+
 test('key manager is disabled by default and exposes no token value in configuration', () => {
   const config = parseConfig({});
   assert.equal(config.keyManager.enabled, false);
