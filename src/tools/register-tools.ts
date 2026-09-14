@@ -73,16 +73,17 @@ async function run(
   signal: AbortSignal,
   fn: () => Promise<Record<string, unknown>>,
   message?: (result: Record<string, unknown>) => string,
-  admissionOverride?: AdmissionClass,
+  admissionOverride?: AdmissionClass | (() => AdmissionClass),
 ): Promise<CallToolResult> {
   const id = diagnosticId();
   const started = performance.now();
   trace('tool_received', { requestId: id, operation });
   try {
+    const admission = typeof admissionOverride === 'function' ? admissionOverride() : admissionOverride;
     const result = await concurrency.run(operation, async () => {
       trace('tool_started', { requestId: id, operation });
       return fn();
-    }, signal, admissionOverride);
+    }, signal, admission);
     trace('tool_completed', { requestId: id, operation, elapsedMs: Math.round(performance.now() - started) });
     return enforceTransportBudget(success(result, message?.(result)), operation);
   } catch (error) {
@@ -271,8 +272,14 @@ export function registerTools(
           ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
           signal: ctx.mcpReq.signal,
         };
-        const admission = adapter.classifyExec?.(request) ?? 'shell-local';
-        return run('shell.exec', concurrency, ctx.mcpReq.signal, async () => ({ ...await adapter.exec(request) }), undefined, admission);
+        return run(
+          'shell.exec',
+          concurrency,
+          ctx.mcpReq.signal,
+          async () => ({ ...await adapter.exec(request) }),
+          undefined,
+          () => adapter.classifyExec?.(request) ?? 'shell-local',
+        );
       },
     );
   }

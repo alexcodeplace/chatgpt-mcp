@@ -164,6 +164,37 @@ test('shell tool delegates argument-array execution unchanged', async () => {
   }
 });
 
+test('shell admission policy errors preserve the configured MCP blocker message', async () => {
+  let executions = 0;
+  const adapter = fakeAdapter();
+  adapter.classifyExec = () => {
+    throw adapterError(
+      'COMMAND_NOT_ALLOWED',
+      'shell.exec',
+      'Heavy browser workloads are forbidden here. Use the Kubernetes E2E runner instead.',
+      { ruleId: 'deny-browser-e2e-local' },
+    );
+  };
+  adapter.exec = async () => {
+    executions += 1;
+    return { exitCode: 0, stdout: 'must-not-run', stderr: '', durationMs: 1, timedOut: false };
+  };
+  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['pnpm'] } }, adapter);
+  try {
+    const result = await client.callTool({ name: 'shell.exec', arguments: { command: 'pnpm', args: ['test:worker-browser'], cwd: '/tmp' } });
+    assert.equal(result.isError, true);
+    const first = result.content[0];
+    const text = first?.type === 'text' ? first.text : '';
+    assert.match(text, /COMMAND_NOT_ALLOWED/);
+    assert.match(text, /Heavy browser workloads are forbidden here\. Use the Kubernetes E2E runner instead\./);
+    assert.match(text, /deny-browser-e2e-local/);
+    assert.equal(executions, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test('successful structured results are not duplicated into text content', async () => {
   const adapter = fakeAdapter();
   adapter.exec = async () => ({ exitCode: 0, stdout: 'payload', stderr: '', durationMs: 1, timedOut: false });
