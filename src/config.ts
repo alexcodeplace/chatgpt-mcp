@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as z from 'zod/v4';
+import { brokerUrl } from './key-manager/client.js';
 
 const filesystemBlocklistEntrySchema = z.object({
   path: z.string().min(1),
@@ -268,7 +269,7 @@ const outputRedactionSchema = z.object({
 
 const keyManagerSchema = z.object({
   enabled: z.boolean().default(false),
-  url: z.string().url().default('http://127.0.0.1:4987'),
+  url: z.string().url().refine(value => { try { brokerUrl(value); return true; } catch { return false; } }, 'key-manager URL must use HTTPS or loopback HTTP without embedded credentials').default('http://127.0.0.1:4987'),
   tokenFile: z.string().min(1).optional(),
   timeoutMs: z.number().int().min(100).max(60_000).default(10_000),
 }).superRefine((value, ctx) => {

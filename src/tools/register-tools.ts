@@ -57,6 +57,8 @@ function failure(error: unknown, operation: string): CallToolResult {
 
 function mapKeyManagerError(error: unknown, operation: string): unknown {
   if (!(error instanceof KeyManagerClientError)) return error;
+  if (error.status === 429) return adapterError('OVERLOADED', operation, error.message);
+  if (/cancelled/i.test(error.message)) return adapterError('CANCELLED', operation, error.message);
   if (error.status === 404) return adapterError('NOT_FOUND', operation, error.message);
   if (error.status === 409) return adapterError('CONFLICT', operation, error.message);
   if (/timed out/i.test(error.message)) return adapterError('TIMEOUT', operation, error.message);
@@ -162,12 +164,12 @@ export function registerTools(
       'kmgr.list',
       {
         title: 'List Named Keys',
-        description: 'List only key names and non-secret metadata authorized for this connector. Values, paths, prefixes and fingerprints are never returned. Use kmgr tools instead of reading credential files.',
+        description: 'List only key names authorized for this connector. Values, paths, prefixes and fingerprints are never returned. Use kmgr tools instead of reading credential files.',
         inputSchema: z.object({ project: z.string().min(1).max(160).optional() }),
-        outputSchema: z.object({ keys: z.array(z.object({ name: z.string(), project: z.string(), provider: z.string(), version: z.number().int().positive(), updatedAt: z.string() })) }),
+        outputSchema: z.object({ keys: z.array(z.object({ name: z.string() })) }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ project }, ctx) => kmgrRun('kmgr.list', ctx.mcpReq.signal, async () => client.list(project)),
+      async ({ project }, ctx) => kmgrRun('kmgr.list', ctx.mcpReq.signal, async () => client.list(project, ctx.mcpReq.signal)),
     );
 
     tools.registerTool(
@@ -176,10 +178,10 @@ export function registerTools(
         title: 'List Key Operations',
         description: 'List non-secret operation profiles available for a named key. Knowing a key name does not grant access.',
         inputSchema: z.object({ keyName: z.string().min(1).max(240) }),
-        outputSchema: z.object({ profiles: z.array(z.object({ id: z.string(), label: z.string(), provider: z.string() })) }),
+        outputSchema: z.object({ profiles: z.array(z.object({ id: z.string(), version: z.number().int().positive(), label: z.string(), provider: z.string() })) }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ keyName }, ctx) => kmgrRun('kmgr.profiles', ctx.mcpReq.signal, async () => client.profiles(keyName)),
+      async ({ keyName }, ctx) => kmgrRun('kmgr.profiles', ctx.mcpReq.signal, async () => client.profiles(keyName, ctx.mcpReq.signal)),
     );
 
     tools.registerTool(
@@ -197,7 +199,7 @@ export function registerTools(
         outputSchema: z.record(z.string(), z.unknown()),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       },
-      async (args, ctx) => kmgrRun('kmgr.run', ctx.mcpReq.signal, async () => client.run(args)),
+      async (args, ctx) => kmgrRun('kmgr.run', ctx.mcpReq.signal, async () => client.run(args, ctx.mcpReq.signal)),
     );
 
     tools.registerTool(
@@ -209,7 +211,7 @@ export function registerTools(
         outputSchema: z.record(z.string(), z.unknown()),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ id }, ctx) => kmgrRun('kmgr.status', ctx.mcpReq.signal, async () => client.status(id)),
+      async ({ id }, ctx) => kmgrRun('kmgr.status', ctx.mcpReq.signal, async () => client.status(id, ctx.mcpReq.signal)),
     );
   }
 
