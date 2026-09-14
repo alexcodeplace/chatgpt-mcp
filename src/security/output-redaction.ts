@@ -32,6 +32,7 @@ const HEADER = /^([ \t]*(?:Proxy-)?Authorization|[ \t]*(?:Set-)?Cookie)([ \t]*:[
 const AUTH = /\b(Bearer|Basic)([ \t]+)([A-Za-z0-9+/_=.~-]{4,})/gi;
 const CLI = /(--([A-Za-z][A-Za-z0-9_-]*)[ =]+)("(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s,;&}\]]+)/g;
 const USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/@]+)@/gi;
+const QUERY_SECRET = /([?&]([A-Za-z_][A-Za-z0-9_.-]*)=)([^&#\s]+)/g;
 
 export function isSecretName(name: string): boolean {
   const normalized = name.replace(/([a-z])([A-Z])/g, '$1_$2').replace(/[.-]/g, '_').toLowerCase();
@@ -112,6 +113,7 @@ export class OutputRedactor {
     }
     for (const match of text.matchAll(AUTH)) this.add(match[3]);
     for (const match of text.matchAll(CLI)) if (isSecretName(match[2]!)) this.add(unquote(match[3]!));
+    for (const match of text.matchAll(QUERY_SECRET)) if (isSecretName(match[2]!)) this.add(unquote(match[3]!));
     for (const match of text.matchAll(PRIVATE_KEY)) {
       this.add(match[0]);
       for (const line of match[0].split(/\r?\n/)) if (/^[A-Za-z0-9+/=]{16,}$/.test(line)) this.add(line);
@@ -240,8 +242,6 @@ export class OutputRedactor {
   text(value: string): string {
     if (value.length === 0) return value;
     if (this.suppressText) return SECRET_REDACTED;
-    this.learnText(value);
-    if (this.suppressText) return SECRET_REDACTED;
     if (this.dirty) {
       this.exact = this.values.size === 0 ? undefined : new RegExp([...this.values].sort((a, b) => b.length - a.length)
         .map(secret => secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
@@ -252,6 +252,7 @@ export class OutputRedactor {
     text = text.replace(PRIVATE_KEY, SECRET_REDACTED).replace(PROVIDER_VALUE, SECRET_REDACTED);
     text = text.replace(AUTH, (_match, kind: string, space: string) => kind + space + SECRET_REDACTED);
     text = text.replace(HEADER, (_match, name: string, separator: string) => name + separator + SECRET_REDACTED);
+    text = text.replace(QUERY_SECRET, (match, prefix: string, key: string) => isSecretName(key) ? prefix + SECRET_REDACTED : match);
     text = text.replace(ASSIGNMENT, (match, prefix: string, key: string, raw: string) => {
       if (!isSecretName(key) || raw.includes('SECRET_REDACTED')) return match;
       const quote = raw[0] === '"' || raw[0] === "'" ? raw[0] : '';
@@ -263,7 +264,6 @@ export class OutputRedactor {
 
   value<T>(input: T): T {
     try {
-      this.learn(input);
       const visit = (value: unknown, depth = 0): unknown => {
         if (depth > 32) return SECRET_REDACTED;
         if (typeof value === 'string') return this.text(value);
@@ -287,8 +287,20 @@ export class OutputRedactor {
     await this.refresh();
     const input = this.input as Record<string, unknown> | null;
     let structured = result.structuredContent;
-    this.learn(structured);
-    for (const part of result.content) if (part.type !== 'image' && part.type !== 'audio') this.learn(part);
+    const learnStructuredSecrets = (value: unknown, depth = 0): void => {
+      if (depth > 32 || value === null || typeof value !== 'object') return;
+      if (Array.isArray(value)) { for (const child of value) learnStructuredSecrets(child, depth + 1); return; }
+      for (const [key, child] of Object.entries(value)) {
+        if (isSecretName(key)) this.add(child);
+        else learnStructuredSecrets(child, depth + 1);
+      }
+    };
+    learnStructuredSecrets(structured);
+    // Never learn arbitrary returned text as a secret source. Doing so lets source code,
+    // logs, or diagnostics such as `token = value` poison later output and over-redact
+    // unrelated occurrences of `value`. Secret values are learned only from trusted
+    // inputs, environment, and credential files; secret-named structured fields are
+    // still redacted directly by value().
     if (operation === 'fs.read' && !result.isError && typeof input?.['path'] === 'string') {
       const path = resolve(input['path']);
       let canonical = path;
