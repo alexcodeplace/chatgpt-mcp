@@ -284,3 +284,20 @@ test('local systemd isolation is explicitly opt-in and resource bounded', () => 
   assert.throws(() => parseConfig({ execution: { localIsolation: { tasksMax: 1 } } }));
   assert.throws(() => parseConfig({ execution: { localIsolation: { cpuWeight: 0 } } }));
 });
+
+
+test('key manager is disabled by default and exposes no token value in configuration', () => {
+  const config = parseConfig({});
+  assert.equal(config.keyManager.enabled, false);
+  assert.equal(config.keyManager.url, 'http://127.0.0.1:4987');
+  assert.equal(config.keyManager.tokenFile, undefined);
+  assert.equal(config.keyManager.timeoutMs, 10_000);
+});
+
+test('key manager enablement requires a token file and normalizes only its path', () => {
+  assert.throws(() => parseConfig({ keyManager: { enabled: true } }), /tokenFile is required/);
+  const config = parseConfig({ keyManager: { enabled: true, tokenFile: './kmgr-agent-token' } });
+  assert.equal(config.keyManager.enabled, true);
+  assert.equal(config.keyManager.tokenFile?.endsWith('/kmgr-agent-token'), true);
+  assert.equal('token' in config.keyManager, false);
+});

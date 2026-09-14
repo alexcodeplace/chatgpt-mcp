@@ -390,3 +390,23 @@ test('filesystem blocklist does not disable unrelated GUI browser or input capab
     await server.close();
   }
 });
+
+
+test('key manager tools are opt-in and expose only agent operations', async () => {
+  const { client, server } = await harness({
+    keyManager: { enabled: true, tokenFile: '/tmp/kmgr-test-token' },
+  });
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name).sort();
+    assert.deepEqual(names, ['kmgr.list', 'kmgr.profiles', 'kmgr.run', 'kmgr.status', 'system.info']);
+    const info = await client.callTool({ name: 'system.info', arguments: {} });
+    const capabilities = (info.structuredContent as { capabilities?: Record<string, boolean> } | undefined)?.capabilities;
+    assert.equal(capabilities?.keyManager, true);
+    for (const forbidden of ['kmgr.get', 'kmgr.reveal', 'kmgr.import', 'kmgr.approve', 'kmgr.grant', 'kmgr.delete']) {
+      assert.equal(names.includes(forbidden), false);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
