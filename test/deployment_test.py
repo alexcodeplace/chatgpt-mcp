@@ -133,6 +133,7 @@ class DeploymentTests(unittest.TestCase):
             env = {**os.environ, 'XDG_RUNTIME_DIR': str(runtime)}
             path = root / 'mcp-unit-fixture.service'
             text = deploy.backend_unit_text('a' * 40, root, work, root / 'config.json', pathlib.Path(shutil.which('node')))
+            self.assertIn('Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin', text)
             path.write_text(text)
             result = subprocess.run(['systemd-analyze', '--user', 'verify', str(path)], capture_output=True, text=True, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
