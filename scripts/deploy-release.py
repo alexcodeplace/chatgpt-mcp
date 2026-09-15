@@ -183,6 +183,7 @@ Environment=CHATGPT_MCP_CONFIG={config_path}
 Environment=CHATGPT_MCP_RELEASE={revision}
 Environment=CHATGPT_MCP_TRACE=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 UnsetEnvironment=DISPLAY WAYLAND_DISPLAY MIR_SOCKET
 ExecStartPre=/usr/bin/python3 "{release}/scripts/release.py" verify "{release}"
 ExecStart="{node}" "{release}/dist/src/http.js"
