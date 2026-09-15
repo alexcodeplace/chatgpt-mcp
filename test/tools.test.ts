@@ -71,6 +71,26 @@ test('tool discovery exposes only granted capability families', async () => {
   }
 });
 
+test('tool discovery points agents to named-key operations when key manager is enabled', async () => {
+  const { client, server } = await harness({
+    filesystem: { read: true, roots: ['/tmp'] },
+    shell: { enabled: true, allowedCommands: ['node'] },
+    keyManager: { enabled: true, url: 'http://127.0.0.1:4987', tokenFile: '/tmp/kmgr-token' },
+  });
+  try {
+    const tools = (await client.listTools()).tools;
+    const read = tools.find(tool => tool.name === 'fs.read');
+    const shell = tools.find(tool => tool.name === 'shell.exec');
+    assert.match(read?.description ?? '', /kmgr\.list/);
+    assert.match(read?.description ?? '', /kmgr\.run/);
+    assert.match(shell?.description ?? '', /key value stays inside the broker/);
+    assert.ok(tools.some(tool => tool.name === 'kmgr.status'));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test('host display master gate omits all display-dependent tools', async () => {
   const { client, server } = await harness({
     application: { enabled: true, applications: { editor: { command: 'editor' } } },

@@ -231,7 +231,9 @@ export function registerTools(
       'fs.read',
       {
         title: 'Read File',
-        description: 'Read a UTF-8 file inside granted roots. Returned content is passed through unchanged, subject to the configured read and response-size limits.',
+        description: config.keyManager.enabled
+          ? 'Read a UTF-8 file inside granted roots. Returned content is passed through unchanged, subject to configured limits. For named API keys or service credentials, use kmgr.list, kmgr.profiles, kmgr.run and kmgr.status instead of reading key files.'
+          : 'Read a UTF-8 file inside granted roots. Returned content is passed through unchanged, subject to the configured read and response-size limits.',
         inputSchema: z.object({ path: pathInput, maxBytes: z.number().int().positive().optional() }),
         outputSchema: z.object({ path: z.string(), content: z.string(), bytes: z.number().int().nonnegative() }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -326,7 +328,9 @@ export function registerTools(
       'shell.exec',
       {
         title: 'Execute Command',
-        description: 'Execute a short locally allowed command without an implicit shell. Stdout and stderr are returned unchanged, subject to configured output and transport limits. Prefer exec.start/status/output for long work when available. A lost response does not prove the command failed; inspect its effects before retrying. OVERLOADED means capacity pressure, not missing permissions.',
+        description: config.keyManager.enabled
+          ? 'Execute a short locally allowed command without an implicit shell. For operations needing a named API key or service credential, use kmgr.list, kmgr.profiles, kmgr.run and kmgr.status; the key value stays inside the broker. Prefer exec.start/status/output for long work when available. OVERLOADED means capacity pressure, not missing permissions.'
+          : 'Execute a short locally allowed command without an implicit shell. Stdout and stderr are returned unchanged, subject to configured output and transport limits. Prefer exec.start/status/output for long work when available. A lost response does not prove the command failed; inspect its effects before retrying. OVERLOADED means capacity pressure, not missing permissions.',
         inputSchema: z.object({
           command: z.string().min(1),
           args: z.array(z.string()).default([]),
