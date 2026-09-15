@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -115,6 +115,34 @@ test('job execution enforces existing shell and cwd policies', async () => {
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+
+test('durable admission applies deny-read shell guards before launch while unrelated reads remain allowed', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mcp-jobs-deny-read-'));
+  const protectedDir = join(directory, 'protected');
+  const protectedFile = join(protectedDir, 'token.txt');
+  const ordinary = join(directory, 'ordinary.txt');
+  await mkdir(protectedDir);
+  await writeFile(protectedFile, 'synthetic-secret');
+  await writeFile(ordinary, 'ordinary');
+  const config = parseConfig({
+    jobs: { enabled: true, directory: join(directory, 'jobs'), launcher: 'detached', maxConcurrent: 2 },
+    filesystem: { roots: [directory], blocklist: [{ path: protectedDir, mode: 'deny-read', message: 'Use deck-kmgr.' }] },
+    shell: { enabled: true, allowedCommands: ['cat'] },
+  });
+  let launches = 0;
+  try {
+    const store = new JobStore(config, async () => { launches++; });
+    await assert.rejects(
+      store.start('durable-read-denial', { command: 'cat', args: ['protected/token.txt'], cwd: directory }),
+      (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED'
+        && (error as { message?: string }).message === 'Use deck-kmgr.',
+    );
+    assert.equal(launches, 0);
+    const accepted = await store.start('durable-read-allowed', { command: 'cat', args: [ordinary], cwd: directory });
+    assert.equal(accepted.state, 'starting');
+    assert.equal(launches, 1);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('durable output preserves credential-looking text verbatim', async () => {
   const { directory, config, request } = await fixture();
