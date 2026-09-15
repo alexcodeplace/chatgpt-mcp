@@ -4,12 +4,12 @@ import { adapterError } from '../errors.js';
 
 export interface FilesystemBlockRule {
   readonly path: string;
-  readonly mode: 'freeze-children';
+  readonly mode: 'freeze-children' | 'deny-read';
   readonly message?: string | undefined;
 }
 
-
 const DEFAULT_FREEZE_MESSAGE = 'Filesystem policy prevents changing entries directly inside this directory.';
+const DEFAULT_READ_DENY_MESSAGE = 'Filesystem policy prevents reading this path.';
 
 function isWithin(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
@@ -52,7 +52,7 @@ function blocked(rule: FilesystemBlockRule, operation: string, candidate: string
   throw adapterError(
     'PATH_NOT_ALLOWED',
     operation,
-    rule.message ?? DEFAULT_FREEZE_MESSAGE,
+    rule.message ?? (rule.mode === 'deny-read' ? DEFAULT_READ_DENY_MESSAGE : DEFAULT_FREEZE_MESSAGE),
     { path: candidate, blocklistPath: resolve(rule.path), mode: rule.mode },
   );
 }
@@ -123,7 +123,6 @@ export async function authorizePathEntryMutation(
   if (rule !== undefined) blocked(rule, operation, candidate);
 }
 
-
 const SHELL_CREATE_COMMANDS = new Set(['mkdir']);
 const SHELL_REMOVE_COMMANDS = new Set(['rmdir', 'rm']);
 
@@ -189,6 +188,29 @@ export async function authorizeShellFilesystemMutation(
   }
 }
 
+/** Refuse direct reads of an exact protected file or descendants of a protected directory. */
+export async function authorizePathRead(
+  requestedPath: string,
+  configuredRoots: readonly string[],
+  rules: readonly FilesystemBlockRule[],
+  operation = 'fs.read',
+): Promise<string> {
+  const candidate = await authorizePath(requestedPath, configuredRoots, operation);
+  if (rules.length === 0) return candidate;
+  let candidateReal: string;
+  try {
+    candidateReal = await realpath(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return candidate;
+    throw error;
+  }
+  for (const rule of rules) {
+    if (rule.mode !== 'deny-read') continue;
+    const protectedReal = await canonicalRulePath(rule, operation);
+    if (isWithin(protectedReal, candidateReal)) blocked(rule, operation, candidate);
+  }
+  return candidate;
+}
 
 export async function authorizePath(
   requestedPath: string,

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   authorizePath,
+  authorizePathRead,
   authorizePathEntryCreation,
   authorizePathEntryMutation,
   authorizeShellFilesystemMutation,
@@ -182,6 +183,48 @@ test('direct shell mutation guard blocks protected mkdir/rmdir/rm without affect
       (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
     );
     await authorizeShellFilesystemMutation('node', ['-e', 'process.exit(0)'], existing, rules);
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+
+test('deny-read blocks an exact file and directory descendants with the configured message', async () => {
+  const f = await fixture();
+  const protectedDir = join(f.root, 'protected');
+  const protectedFile = join(protectedDir, 'token.txt');
+  const sibling = join(f.root, 'ordinary.txt');
+  try {
+    await mkdir(protectedDir);
+    await writeFile(protectedFile, 'synthetic');
+    await writeFile(sibling, 'ok');
+    const message = 'Use the brokered named-key tools for this path.';
+    await assert.rejects(
+      () => authorizePathRead(protectedFile, [f.root], [{ path: protectedFile, mode: 'deny-read', message }]),
+      (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED' && (error as { message?: string }).message === message,
+    );
+    await assert.rejects(
+      () => authorizePathRead(protectedFile, [f.root], [{ path: protectedDir, mode: 'deny-read' }]),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    assert.equal(await authorizePathRead(sibling, [f.root], [{ path: protectedDir, mode: 'deny-read' }]), sibling);
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+test('deny-read follows aliases to a protected file while freeze-children remains read-neutral', async () => {
+  const f = await fixture();
+  const protectedFile = join(f.root, 'protected.txt');
+  const alias = join(f.root, 'alias.txt');
+  try {
+    await writeFile(protectedFile, 'synthetic');
+    await symlink(protectedFile, alias);
+    await assert.rejects(
+      () => authorizePathRead(alias, [f.root], [{ path: protectedFile, mode: 'deny-read' }]),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    assert.equal(await authorizePathRead(protectedFile, [f.root], [{ path: f.root, mode: 'freeze-children' }]), protectedFile);
   } finally {
     await rm(f.base, { recursive: true, force: true });
   }
