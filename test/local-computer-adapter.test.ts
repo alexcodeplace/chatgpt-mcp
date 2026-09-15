@@ -171,6 +171,32 @@ test('filesystem blocklist does not force local isolation and guards direct mkdi
   }
 });
 
+test('deny-read also blocks common direct shell readers before execution', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-deny-read-shell-'));
+  const protectedDir = join(root, 'protected');
+  const ordinary = join(root, 'ordinary.txt');
+  await import('node:fs/promises').then(async ({ mkdir, writeFile }) => {
+    await mkdir(protectedDir);
+    await writeFile(join(protectedDir, 'token'), 'synthetic');
+    await writeFile(ordinary, 'ordinary');
+  });
+  const adapter = new LocalComputerAdapter(parseConfig({
+    filesystem: { roots: [root], blocklist: [{ path: protectedDir, mode: 'deny-read', message: 'Use deck-kmgr.' }] },
+    shell: { enabled: true, allowedCommands: ['cat'] },
+  }));
+  try {
+    await assert.rejects(
+      () => adapter.exec({ command: 'cat', args: ['protected/token'], cwd: root }),
+      (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED'
+        && (error as { message?: string }).message === 'Use deck-kmgr.',
+    );
+    const ok = await adapter.exec({ command: 'cat', args: [ordinary], cwd: root });
+    assert.equal(ok.stdout, 'ordinary');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('filesystem read and write limits fail closed', async () => {
   const root = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-limits-'));
   const config = parseConfig({

@@ -6,7 +6,7 @@ import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
-import { authorizePath, authorizePathRead, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
+import { authorizePath, authorizePathRead, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation, authorizeShellFilesystemRead } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
 import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
 import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
@@ -278,6 +278,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     if (request.cwd !== undefined) {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
+    await authorizeShellFilesystemRead(request.command, request.args, cwd, this.config.filesystem.blocklist, operation);
     await authorizeShellFilesystemMutation(request.command, request.args, cwd, this.config.filesystem.blocklist, operation);
     const env = nonInteractiveShellEnvironment(
       validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess),

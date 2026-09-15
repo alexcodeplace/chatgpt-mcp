@@ -125,6 +125,26 @@ export async function authorizePathEntryMutation(
 
 const SHELL_CREATE_COMMANDS = new Set(['mkdir']);
 const SHELL_REMOVE_COMMANDS = new Set(['rmdir', 'rm']);
+const SHELL_DIRECT_READ_COMMANDS = new Set([
+  'cat', 'head', 'tail', 'strings', 'wc', 'base64', 'xxd', 'hexdump', 'od',
+  'md5sum', 'sha1sum', 'sha224sum', 'sha256sum', 'sha384sum', 'sha512sum', 'b2sum',
+  'cp', 'grep', 'sed', 'awk',
+]);
+
+function shellReadOperands(command: string, args: readonly string[]): string[] {
+  if (command === 'dd') {
+    return args.flatMap(arg => arg.startsWith('if=') && arg.length > 3 ? [arg.slice(3)] : []);
+  }
+  if (!SHELL_DIRECT_READ_COMMANDS.has(command)) return [];
+  const paths: string[] = [];
+  let options = true;
+  for (const arg of args) {
+    if (options && arg === '--') { options = false; continue; }
+    if (options && arg.startsWith('-') && arg !== '-') continue;
+    if (arg !== '-') paths.push(arg);
+  }
+  return paths;
+}
 
 function shellOperands(command: string, args: readonly string[]): { paths: string[]; parents: boolean } {
   const paths: string[] = [];
@@ -157,6 +177,37 @@ function shellOperands(command: string, args: readonly string[]): { paths: strin
  * it never changes the execution backend and does not try to parse arbitrary
  * wrappers or language runtimes.
  */
+/**
+ * Refuse common direct shell reads of protected paths. This covers obvious
+ * argument-array readers without pretending to sandbox arbitrary runtimes.
+ */
+export async function authorizeShellFilesystemRead(
+  command: string,
+  args: readonly string[],
+  cwd: string | undefined,
+  rules: readonly FilesystemBlockRule[],
+  operation = 'shell.exec',
+): Promise<void> {
+  if (!rules.some(rule => rule.mode === 'deny-read')) return;
+  const executable = basename(command);
+  const base = cwd ?? process.cwd();
+  for (const rawPath of shellReadOperands(executable, args)) {
+    const candidate = resolve(base, rawPath);
+    let candidateReal: string;
+    try {
+      candidateReal = await realpath(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const rule of rules) {
+      if (rule.mode !== 'deny-read') continue;
+      const protectedReal = await canonicalRulePath(rule, operation);
+      if (isWithin(protectedReal, candidateReal)) blocked(rule, operation, candidate);
+    }
+  }
+}
+
 export async function authorizeShellFilesystemMutation(
   command: string,
   args: readonly string[],
