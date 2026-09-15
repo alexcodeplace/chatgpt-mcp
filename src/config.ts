@@ -7,7 +7,7 @@ import { brokerUrl } from './key-manager/client.js';
 
 const filesystemBlocklistEntrySchema = z.object({
   path: z.string().min(1),
-  mode: z.literal('freeze-children').default('freeze-children'),
+  mode: z.enum(['freeze-children', 'deny-read']).default('freeze-children'),
   message: z.string().min(1).max(4096).optional(),
 });
 

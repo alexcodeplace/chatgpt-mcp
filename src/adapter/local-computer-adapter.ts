@@ -6,7 +6,7 @@ import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
-import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
+import { authorizePath, authorizePathRead, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
 import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
 import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
@@ -161,7 +161,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
     const limit = Math.min(maxBytes ?? this.config.filesystem.maxReadBytes, this.config.filesystem.maxReadBytes);
     try {
-      const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      const path = await authorizePathRead(requestedPath, this.config.filesystem.roots, this.config.filesystem.blocklist, operation);
       const metadata = await stat(path);
       if (!metadata.isFile()) throw adapterError('INVALID_INPUT', operation, 'Path is not a regular file.', { path });
       if (metadata.size > limit) {

@@ -74,6 +74,12 @@ test('filesystem blocklist normalizes paths and defaults to freeze-children mode
   assert.equal(config.filesystem.blocklist[0]?.message, 'Use the project .worktrees directory.');
 });
 
+test('filesystem blocklist accepts explicit deny-read mode', () => {
+  const config = parseConfig({ filesystem: { blocklist: [{ path: '/tmp/private-file', mode: 'deny-read', message: 'Use the named-key broker.' }] } });
+  assert.equal(config.filesystem.blocklist[0]?.mode, 'deny-read');
+  assert.equal(config.filesystem.blocklist[0]?.path, '/tmp/private-file');
+});
+
 test('environment overrides file transport settings', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-config-'));
   try {
