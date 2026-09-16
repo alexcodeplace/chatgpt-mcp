@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import type { ExecRequest } from '../adapter/computer-adapter.js';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError } from '../errors.js';
-import { authorizePath, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
+import { authorizePath, authorizeShellFilesystemMutation, authorizeShellFilesystemRead } from '../policy/filesystem.js';
 import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, validateShellEnvironment } from '../policy/shell.js';
 import { compileCommandPolicies, enforceCommandPolicy, evaluateCommandPolicy } from '../policy/command-policy.js';
 import { spawnBounded } from './bounded-process.js';
@@ -124,6 +124,7 @@ export class JobStore {
       if (policy?.action.type === 'route' && policy.action.backend === 'kubernetes' && (!this.config.execution.kubernetes.enabled || this.config.execution.kubernetes.image === undefined)) {
         throw adapterError('CAPABILITY_DISABLED', 'exec.start', 'Command policy requires the Kubernetes execution backend, but it is not configured.', { ruleId: policy.ruleId, backend: 'kubernetes' });
       }
+      await authorizeShellFilesystemRead(supplied.command, supplied.args, cwd, this.config.filesystem.blocklist, 'exec.start');
       await authorizeShellFilesystemMutation(supplied.command, supplied.args, cwd, this.config.filesystem.blocklist, 'exec.start');
       validateShellEnvironment(supplied.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess);
       const timeoutMs = effectiveShellRuntime(supplied.timeoutMs, this.config.shell.defaultRuntimeMs ?? 30_000, this.config.shell.maxRuntimeMs);
