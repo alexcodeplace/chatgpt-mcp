@@ -75,7 +75,14 @@ test('adopt the original listener under real traffic without replacing its PID, 
     const bridgePath = join(f.root, 'bridge.json');
     await writeFile(bridgePath, JSON.stringify(settings), { mode: 0o600 });
     phase = 'live-attach';
-    const installed = await attachLegacy(bridgePath);
+    let installed: Record<string, unknown>;
+    try { installed = await attachLegacy(bridgePath); }
+    catch (error) {
+      const probe = await fetch(originalUrl + '/__hotswap/bridge', { headers: { 'x-mcp-route-key': f.key }, signal: AbortSignal.timeout(2000) })
+        .then(async response => ({ status: response.status, body: await response.json() }))
+        .catch(() => ({ status: 'unavailable' }));
+      throw new Error((error instanceof Error ? error.message : 'adoption refused') + ' fixture observation=' + JSON.stringify(probe), { cause: error });
+    }
     console.log(JSON.stringify({ adoptionStage: 'attached', inspectorClosed: installed.inspectorClosed, node: process.versions.node }));
     if (pumpFailure) throw new Error('continuous calls failed during ' + pumpFailurePhase, { cause: pumpFailure });
     assert.equal(installed.inspectorClosed, true); assert.equal(installed.pid, a.child.pid);

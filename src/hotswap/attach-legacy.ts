@@ -188,9 +188,16 @@ export async function attachLegacy(path: string): Promise<Record<string, unknown
     }
   }
   if (!closed) throw new RouteError('INSPECTOR_CLOSURE_NOT_CONFIRMED');
-  const installed = await bridgeStatus(settings, key);
-  if (!installed || installed.inspectorOpen !== false) throw new RouteError('ADOPTION_NOT_CONFIRMED');
-  return { ...installed, inspectorClosed: true };
+  // Closing the inspector listener precedes resuming the main event loop on
+  // some Node builds. Observe completion rather than mistaking that transition
+  // for a failed adoption. These are read-only probes, never a replay of adopt.
+  const readyDeadline = Date.now() + 5000;
+  while (Date.now() < readyDeadline) {
+    const installed = await bridgeStatus(settings, key);
+    if (installed?.inspectorOpen === false) return { ...installed, inspectorClosed: true };
+    await delay(20);
+  }
+  throw new RouteError('ADOPTION_NOT_CONFIRMED');
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
