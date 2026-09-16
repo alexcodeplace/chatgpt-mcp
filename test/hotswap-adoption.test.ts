@@ -116,6 +116,8 @@ test('adopt the original listener under real traffic without replacing its PID, 
     assert.ok(count > 0);
     const foreign = await fetch(originalUrl + '/healthz', { headers: { origin: 'https://foreign.invalid' } });
     assert.equal(foreign.status, 403, 'the bridge must not erase origin validation');
+    const foreignHost = await fetch(originalUrl + '/healthz', { headers: { host: 'foreign.invalid' } });
+    assert.equal(foreignHost.status, 403, 'the bridge must preserve Host validation too');
     // This is a separate cold-start test, after the hot-upgrade proof completed.
     // Restarted ingress must not impersonate the previous backend incarnation.
     phase = 'separate-cold-start';
@@ -131,7 +133,7 @@ test('adopt the original listener under real traffic without replacing its PID, 
     console.log(JSON.stringify({ acceptance: 'live-listener-adoption', pidPreserved: true, tcpSocketPreserved: true,
       activeCallPreserved: true, cancellationPreserved: true, oldRawHandlePreserved: true, inspectorClosed: true, continuousCycles: count, startupPreload: true }));
   } catch (error) {
-    throw new Error('adoption test failed in ' + phase, { cause: error });
+    throw new Error('adoption test failed in ' + phase + ': ' + (error instanceof Error ? error.message : 'unknown'), { cause: error });
   } finally {
     stop = true; agent.destroy(); await f.cleanup(); await pump?.catch(() => {}); await Promise.allSettled(pending);
   }

@@ -3,9 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
 import { request, Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import * as z from 'zod/v4';
-import { parseConfig } from '../config.js';
 import { processIdentity } from '../execution/job-store.js';
-import { validators } from '../http-server.js';
 import { equalSecret } from './identity.js';
 import { forwardHeaders, json, loopbackUrl, RouteError } from './wire.js';
 
@@ -24,7 +22,6 @@ export interface PreparedBridge {
   key: string;
   fingerprint: string;
   legacyAvailable: boolean;
-  validate: ReturnType<typeof validators>;
 }
 interface Receipt { bridgeAbi: 1; pid: number; generation: string; legacyAvailable: boolean; port: number; unchanged: boolean }
 interface Installed { fingerprint: string; listener: (req: IncomingMessage, res: ServerResponse) => void; receipt: Receipt }
@@ -55,8 +52,7 @@ export async function prepareBridge(path: string, startup = false): Promise<Prep
   if (!startup && !legacyAvailable) throw new RouteError('LEGACY_PROCESS_IDENTITY_CHANGED');
   const key = (await readPrivateFile(settings.keyFile)).trim();
   if (!/^[a-f0-9]{64}$/.test(key)) throw new RouteError('PRIVATE_ROUTER_KEY_REQUIRED');
-  const config = parseConfig(JSON.parse(await readPrivateFile(settings.configPath)));
-  return { settings, key, legacyAvailable, validate: validators(config),
+  return { settings, key, legacyAvailable,
     fingerprint: createHash('sha256').update(JSON.stringify(settings)).update(key).digest('hex') };
 }
 
@@ -84,7 +80,6 @@ export function installBridge(server: Server, prepared: PreparedBridge): Receipt
     legacyAvailable: prepared.legacyAvailable, port: prepared.settings.port, unchanged: false };
   const listener = (req: IncomingMessage, res: ServerResponse) => {
     try {
-      if (!prepared.validate.host(req, res) || !prepared.validate.origin(req, res)) return;
       const internal = equalSecret(req.headers['x-mcp-route-key'], prepared.key);
       if (internal && req.url === '/__hotswap/bridge' && req.method === 'GET') {
         json(res, 200, { ...receipt, inspectorOpen: inspectorUrl() !== undefined }); return;
@@ -105,6 +100,12 @@ export function installBridge(server: Server, prepared: PreparedBridge): Receipt
         json(res, 404, { error: 'NOT_FOUND' }); return;
       }
       const headers = forwardHeaders(req.headers);
+      // Preserve the original authority and Origin. The persistent router owns
+      // the same configured Host/Origin checks; the private legacy bypass calls
+      // its captured original handler, which also keeps its original checks.
+      // Importing the MCP server here pulls SDK module initialization into a
+      // one-time inspector attachment and is deliberately avoided.
+      if (req.headers.host) headers.host = req.headers.host;
       // Unlike the MCP-aware router, this bridge never parses or rewrites bodies.
       if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
       if (req.headers['content-encoding']) headers['content-encoding'] = req.headers['content-encoding'];
