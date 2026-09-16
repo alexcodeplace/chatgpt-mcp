@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import re
 import sys
 import threading
 import time
@@ -19,10 +20,20 @@ import urllib.request
 import uuid
 
 sys.dont_write_bytecode = True
-from hot_control import atomic_json, control, load_state, read_json, select, state_path
+from hot_control import atomic_json, control, load_state, read_json, select, state_path, process_identity
 
 
-def prove(home, expected, mode, report):
+def desktop_observation(before, after, exercised):
+    keys = ['application', 'browser', 'hostDisplayAccess', 'screenCapture', 'screenRecording', 'input']
+    original = {key: bool(before.get(key, False)) for key in keys}
+    current = {key: bool(after.get(key, False)) for key in keys}
+    if original != current:
+        raise RuntimeError('desktop capabilities changed during the upgrade')
+    return {'granted': current, 'policyUnchanged': True,
+            'proof': 'passed' if exercised else 'not exercised; actual grants are reported separately'}
+
+
+def prove(home, expected, mode, report, desktop_display=None):
     active = read_json(home / '.config/chatgpt-mcp/active.json')
     target = read_json(home / '.config/overdeck/mcp-target.json')
     config = read_json(active['configPath'])
@@ -38,6 +49,8 @@ def prove(home, expected, mode, report):
     faults = []
     jobs = []
     observations = {}
+    desktop_resources = []
+    desktop_results = []
     phase = 'preparing'
 
     def call(name, arguments):
@@ -112,6 +125,68 @@ def prove(home, expected, mode, report):
             faults.append(type(error).__name__ + ': ' + str(error)[:180])
             stop.set()
 
+    def desktop_start(label):
+        if desktop_display is None:
+            return None
+        profile = root / ('firefox-profile-' + label)
+        call('fs.mkdir', {'path': str(profile), 'recursive': False})
+        browser = call('app.launch', {'name': 'firefox', 'display': desktop_display,
+            'args': ['about:blank', '--no-remote', '--profile', str(profile)]})
+        owned = {'label': label, 'browser': browser, 'browserIdentity': process_identity(browser['pid']),
+                 'browserCloseAttempted': False, 'recordingStopAttempted': False}
+        desktop_resources.append(owned)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            window = call('shell.exec', {'command': 'xdotool', 'args': ['search', '--onlyvisible', '--pid', str(browser['pid'])],
+                          'env': {'DISPLAY': desktop_display}, 'timeoutMs': 3000})
+            if window['exitCode'] == 0 and window['stdout'].strip():
+                owned['windowIds'] = window['stdout'].split()
+                break
+            if process_identity(browser['pid']) != owned['browserIdentity']:
+                raise RuntimeError('isolated browser exited before its window became visible')
+            time.sleep(.1)
+        else:
+            raise RuntimeError('isolated browser did not expose a visible window')
+        capture = call('screen.capture', {'display': desktop_display})
+        if capture.get('mimeType') != 'image/png' or capture.get('bytes', 0) <= 100:
+            raise RuntimeError('real desktop capture did not produce a PNG')
+        recording = call('screen.record.start', {'display': desktop_display, 'path': str(root / (label + '.mp4')), 'frameRate': 4})
+        owned.update(recording=recording, recordingIdentity=process_identity(recording['pid']))
+        if not owned['browserIdentity'] or not owned['recordingIdentity']:
+            raise RuntimeError('desktop resource ownership was not observed')
+        return owned
+
+    def desktop_finish(owned):
+        if owned is None:
+            return
+        browser, recording = owned['browser'], owned['recording']
+        if process_identity(browser['pid']) != owned['browserIdentity'] or process_identity(recording['pid']) != owned['recordingIdentity']:
+            raise RuntimeError('desktop resource did not retain its original process incarnation')
+        visible = call('shell.exec', {'command': 'xdotool', 'args': ['search', '--onlyvisible', '--pid', str(browser['pid'])],
+                       'env': {'DISPLAY': desktop_display}, 'timeoutMs': 3000})
+        if visible['exitCode'] != 0 or not set(owned['windowIds']).intersection(visible['stdout'].split()):
+            raise RuntimeError('browser window was lost across the version change')
+        # Mark before dispatch: an uncertain acknowledgement never authorizes a
+        # second stop/close submission from the cleanup path.
+        owned['recordingStopAttempted'] = True
+        finalized = call('screen.record.stop', {'handle': recording['handle']})
+        video = call('shell.exec', {'command': 'ffprobe', 'args': ['-v', 'error', '-select_streams', 'v:0',
+                     '-show_entries', 'stream=codec_name,width,height,nb_frames', '-of', 'json', finalized['path']], 'timeoutMs': 5000})
+        if video['exitCode'] != 0:
+            raise RuntimeError('real recording did not finalize into a decodable video')
+        stream = json.loads(video['stdout'])['streams'][0]
+        if stream.get('codec_name') != 'h264' or int(stream.get('nb_frames', 0)) <= 0 or finalized['bytes'] <= 0:
+            raise RuntimeError('real recording contains no verified video frames')
+        owned['browserCloseAttempted'] = True
+        call('app.close', {'handle': browser['handle']})
+        deadline = time.monotonic() + 10
+        while process_identity(browser['pid']) == owned['browserIdentity'] and time.monotonic() < deadline:
+            time.sleep(.05)
+        if process_identity(browser['pid']) == owned['browserIdentity']:
+            raise RuntimeError('owned browser did not close through its retained handle')
+        desktop_results.append({'label': owned['label'], 'browserPid': browser['pid'], 'recordingPid': recording['pid'],
+                                'windowPreserved': True, 'video': stream, 'bytes': finalized['bytes'], 'path': finalized['path']})
+
     def status(phase_name):
         atomic_json(report.with_suffix('.status.json'), {'phase': phase_name, 'mode': mode, 'expected': expected,
             'operation': operation, 'root': str(root), 'completedCycles': len(markers), 'faultCount': len(faults)})
@@ -121,7 +196,16 @@ def prove(home, expected, mode, report):
     manager_log = None
     held = None
     pumps = []
-    before = identity()
+    before_info = call('system.info', {})
+    before = before_info['runtime']
+    if desktop_display is not None:
+        if not re.fullmatch(r':[0-9]+(?:\.[0-9]+)?', desktop_display):
+            raise RuntimeError('desktop proof requires an explicitly selected local test display')
+        if not all(before_info.get('capabilities', {}).get(key) for key in ['application', 'browser', 'hostDisplayAccess', 'screenCapture', 'screenRecording']):
+            raise RuntimeError('the existing desktop grants do not permit the requested proof')
+        firefox = config.get('application', {}).get('applications', {}).get('firefox', {})
+        if not firefox.get('allowArguments'):
+            raise RuntimeError('desktop proof requires the configured Firefox application with isolated-profile arguments')
     tunnel_before = pids()
     if before['release'] == expected:
         raise RuntimeError('proof requires a real version change, not an already-installed revision')
@@ -129,6 +213,7 @@ def prove(home, expected, mode, report):
         call('fs.mkdir', {'path': str(root), 'recursive': False})
         for name in ['writes', 'commands']:
             call('fs.write', {'path': str(root / name), 'content': '', 'mode': 'create'})
+        desktop_a = desktop_start('before-upgrade')
         held = pool.submit(call, 'shell.exec', hold('original-call'))
         wait_started('original-call')
         job_a = call('exec.start', {'operationId': 'hotswap-a-' + operation, **hold('job-a')})
@@ -162,7 +247,9 @@ def prove(home, expected, mode, report):
             raise RuntimeError('normal Overdeck upgrade did not converge before the held-command deadline')
         if manager is not None and manager.returncode != 0:
             raise RuntimeError('normal Overdeck sync did not complete successfully')
-        after = identity()
+        after_info = call('system.info', {})
+        after = after_info['runtime']
+        desktop_observed = desktop_observation(before_info.get('capabilities', {}), after_info.get('capabilities', {}), desktop_display is not None)
         if after['release'] != expected or held.done():
             raise RuntimeError('replacement failed to answer while original call remained active')
         deployment = load_state(home)
@@ -177,6 +264,8 @@ def prove(home, expected, mode, report):
         call('fs.write', {'path': str(root / 'original-call.release'), 'content': 'go', 'mode': 'create'})
         original = held.result(timeout=15)
         assert original['exitCode'] == 0 and original['stdout'] == 'original-call' and not original['timedOut']
+        desktop_finish(desktop_a)
+        desktop_b = desktop_start('after-upgrade')
         job_b = call('exec.start', {'operationId': 'hotswap-b-' + operation, **hold('job-b')})
         jobs.append(job_b); wait_started('job-b')
         job_b = call('exec.status', {'jobId': job_b['jobId']})
@@ -189,6 +278,7 @@ def prove(home, expected, mode, report):
                 observed_b = call('exec.status', {'jobId': job_b['jobId']})
                 assert observed_b['workerPid'] == job_b['workerPid'] and observed_b['workerIdentity'] == job_b['workerIdentity']
                 cancel_job(job_b)
+                desktop_finish(desktop_b)
             finally:
                 select(home, 'activate', selected)
         assert identity()['release'] == expected
@@ -212,7 +302,8 @@ def prove(home, expected, mode, report):
                   'originalCallFinished': True, 'jobHandlesSurvivedUpgradeAndRollback': True, 'cancellationConfirmed': True,
                   'tunnelPidsUnchanged': tunnel_before, 'routerPidUnchanged': current['routerPid'],
                   'newBackendPid': after['pid'], 'oldBackendPid': before['pid'], 'secondApplyUnchanged': True,
-                  'desktopPolicyUnchanged': True, 'desktopLiveProof': 'not exercised; enrolled desktop capabilities remain disabled',
+                  'desktopPolicyUnchanged': desktop_observed['policyUnchanged'], 'desktopLiveProof': desktop_observed['proof'],
+                  'desktopCapabilities': desktop_observed['granted'], 'desktopResults': desktop_results,
                   'auditDirectory': str(root)}
         atomic_json(report, result); status('passed')
         print(json.dumps(result), flush=True)
@@ -233,6 +324,15 @@ def prove(home, expected, mode, report):
                 call('exec.cancel', {'jobId': job['jobId']})
             except Exception:
                 pass
+        for owned in desktop_resources:
+            for kind, operation_name, attempted in [('recording', 'screen.record.stop', 'recordingStopAttempted'), ('browser', 'app.close', 'browserCloseAttempted')]:
+                if kind not in owned or owned[attempted]:
+                    continue
+                owned[attempted] = True
+                try:
+                    call(operation_name, {'handle': owned[kind]['handle']})
+                except Exception:
+                    pass  # Retain the failed proof; never retry an uncertain operation.
         pool.shutdown(wait=True)
         if manager_log is not None:
             manager_log.close()
@@ -243,11 +343,12 @@ if __name__ == '__main__':
     parser.add_argument('--expect', required=True)
     parser.add_argument('--mode', choices=['sync', 'observe'], required=True)
     parser.add_argument('--report', required=True, type=Path)
+    parser.add_argument('--desktop-display', help='Optional dedicated test-owned local X11 display; never enables desktop grants')
     args = parser.parse_args()
     if len(args.expect) != 40 or any(c not in '0123456789abcdef' for c in args.expect):
         parser.error('expected revision must be a full commit ID')
     try:
-        prove(Path.home(), args.expect, args.mode, args.report)
+        prove(Path.home(), args.expect, args.mode, args.report, args.desktop_display)
     except Exception as error:
         print(json.dumps({'state': 'proof-failed', 'errorType': type(error).__name__, 'report': str(args.report)}), file=sys.stderr)
         raise SystemExit(1)

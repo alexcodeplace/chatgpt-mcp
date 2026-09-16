@@ -139,6 +139,19 @@ def deployment_seams(f, bridge_error=None, health='HEALTHY'):
         yield calls
 
 
+class LiveProofMetadataTests(unittest.TestCase):
+    def test_desktop_metadata_uses_actual_grants_and_refuses_policy_drift(self):
+        probe = module('tested_live_hotswap_proof', 'hot-live-proof.py')
+        enabled = {key: True for key in ['application', 'browser', 'hostDisplayAccess', 'screenCapture', 'screenRecording', 'input']}
+        note = probe.desktop_observation(enabled, enabled, False)
+        self.assertEqual(note['granted'], enabled)
+        self.assertNotIn('disabled', note['proof'])
+        self.assertEqual(probe.desktop_observation(enabled, enabled, True)['proof'], 'passed')
+        self.assertTrue(probe.desktop_observation({}, {}, False)['policyUnchanged'])
+        with self.assertRaisesRegex(RuntimeError, 'capabilities changed'):
+            probe.desktop_observation(enabled, {**enabled, 'screenCapture': False}, False)
+
+
 class DeploymentTests(unittest.TestCase):
     def test_activation_changes_selection_not_tunnels_or_old_units(self):
         with fixture() as f, deployment_seams(f) as calls:

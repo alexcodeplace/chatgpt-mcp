@@ -23,6 +23,8 @@ jobs:
       - run: bash -n install.sh scripts/tunnel-status.sh scripts/tunnel-uninstall.sh
       - run: node -e 'JSON.parse(require("fs").readFileSync("config.full.example.json", "utf8"))'
       - run: pnpm install --frozen-lockfile
+      - name: Verify live-proof capability reporting
+        run: python3 -B scripts/test_hot_swap.py LiveProofMetadataTests -v
       - name: Prove disconnect cancellation and live adoption before broad tests
         run: pnpm exec tsx --test test/hotswap-gc.test.ts test/hotswap-adoption.test.ts
       - run: python3 -m unittest discover -s test -p "*_test.py" -v
