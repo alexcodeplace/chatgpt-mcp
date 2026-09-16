@@ -3,11 +3,27 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ChatGptMcpConfig } from './config.js';
 
-const context = new AsyncLocalStorage<{ requestId: string }>();
+const context = new AsyncLocalStorage<{ requestId: string; transportSignal?: AbortSignal; signals: WeakMap<AbortSignal, AbortSignal> }>();
 const startedAt = new Date().toISOString();
 const fingerprints = new WeakMap<object, string>();
 export function diagnosticId(): string { return context.getStore()?.requestId ?? randomUUID(); }
-export function withDiagnosticRequest<T>(fn: () => T): T { return context.run({ requestId: randomUUID() }, fn); }
+export function withDiagnosticRequest<T>(fn: () => T, transportSignal?: AbortSignal): T {
+  return context.run({ requestId: randomUUID(), signals: new WeakMap(), ...(transportSignal ? { transportSignal } : {}) }, fn);
+}
+
+/** Keep cancellation attached to the native HTTP exchange, even when SDK
+ * transports release intermediate Request/AbortSignal objects while streaming.
+ * Stdio and direct SDK users retain their original signal unchanged. */
+export function requestSignal(sdkSignal: AbortSignal): AbortSignal {
+  const current = context.getStore();
+  if (!current?.transportSignal) return sdkSignal;
+  let combined = current.signals.get(sdkSignal);
+  if (!combined) {
+    combined = AbortSignal.any([current.transportSignal, sdkSignal]);
+    current.signals.set(sdkSignal, combined);
+  }
+  return combined;
+}
 
 /** Never include arguments, URLs, environment values, output, or arbitrary exception messages. */
 export function trace(event: string, fields: Record<string, string | number | boolean | null>): void {

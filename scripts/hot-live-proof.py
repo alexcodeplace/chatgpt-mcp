@@ -184,11 +184,13 @@ def prove(home, expected, mode, report):
         with lock_path.open('a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             select(home, 'rollback')
-            assert identity()['release'] == before['release'], 'immediate rollback did not select the original version'
-            observed_b = call('exec.status', {'jobId': job_b['jobId']})
-            assert observed_b['workerPid'] == job_b['workerPid'] and observed_b['workerIdentity'] == job_b['workerIdentity']
-            cancel_job(job_b)
-            select(home, 'activate', selected)
+            try:
+                assert identity()['release'] == before['release'], 'immediate rollback did not select the original version'
+                observed_b = call('exec.status', {'jobId': job_b['jobId']})
+                assert observed_b['workerPid'] == job_b['workerPid'] and observed_b['workerIdentity'] == job_b['workerIdentity']
+                cancel_job(job_b)
+            finally:
+                select(home, 'activate', selected)
         assert identity()['release'] == expected
         phase = 'rollback-and-restoration-passed'; status(phase)
         current = control(deployment['router']['controlSocket'])

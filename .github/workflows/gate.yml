@@ -23,8 +23,12 @@ jobs:
       - run: bash -n install.sh scripts/tunnel-status.sh scripts/tunnel-uninstall.sh
       - run: node -e 'JSON.parse(require("fs").readFileSync("config.full.example.json", "utf8"))'
       - run: pnpm install --frozen-lockfile
+      - name: Prove disconnect cancellation and live adoption before broad tests
+        run: pnpm exec tsx --test test/hotswap-gc.test.ts test/hotswap-adoption.test.ts
       - run: python3 -m unittest discover -s test -p "*_test.py" -v
       - run: pnpm gate
+      - name: Prove compiled upgrade and ownership semantics
+        run: node --test dist/test/hotswap-gc.test.js dist/test/hotswap-adoption.test.js dist/test/hotswap.test.js dist/test/hotswap-recording.test.js
       - name: Package verified runtime inputs
         run: tar -czf mcp-runtime.tgz dist/src node_modules
       - name: Retain exact-revision runtime for managed deployment
