@@ -86,6 +86,7 @@ class InspectorChannel {
     this.pending.clear();
   }
   async evaluate(expression: string): Promise<unknown> {
+    if (this.socket.readyState !== WebSocket.OPEN) throw new RouteError('INSPECTOR_DISCONNECTED');
     const id = ++this.sequence;
     return new Promise((resolveValue, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new RouteError('INSPECTOR_OPERATION_UNCERTAIN')); }, 10_000);
@@ -95,6 +96,31 @@ class InspectorChannel {
   }
   close() { this.socket.close(); }
 }
+async function openOwnedInspector(settings: BridgeConfiguration, inspector: Listener): Promise<InspectorChannel> {
+  if (await processIdentity(settings.expectedPid) !== settings.expectedIdentity
+    || !(await listeningSockets(settings.expectedPid)).some(item => item.inode === inspector.inode && item.loopback)) {
+    throw new RouteError('INSPECTOR_OWNERSHIP_CHANGED');
+  }
+  const response = await fetch(`http://127.0.0.1:${inspector.port}/json/list`, { signal: AbortSignal.timeout(1500) });
+  const targets: unknown = await response.json();
+  if (!Array.isArray(targets) || targets.length !== 1) throw new RouteError('UNEXPECTED_INSPECTOR_TARGETS');
+  const rawUrl = object(targets[0]).webSocketDebuggerUrl;
+  if (typeof rawUrl !== 'string') throw new RouteError('INSPECTOR_ENDPOINT_MISSING');
+  const url = new URL(rawUrl);
+  if (url.protocol !== 'ws:' || url.hostname !== '127.0.0.1' || Number(url.port) !== inspector.port || url.username || url.password) throw new RouteError('UNTRUSTED_INSPECTOR_ENDPOINT');
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolveOpen, reject) => {
+    const timer = setTimeout(() => { socket.close(); reject(new RouteError('INSPECTOR_CONNECT_TIMEOUT')); }, 3000);
+    socket.addEventListener('open', () => { clearTimeout(timer); resolveOpen(); }, { once: true });
+    socket.addEventListener('error', () => { clearTimeout(timer); reject(new RouteError('INSPECTOR_CONNECT_FAILED')); }, { once: true });
+  });
+  const channel = new InspectorChannel(socket);
+  try {
+    if (await channel.evaluate('process.pid') !== settings.expectedPid) throw new RouteError('INSPECTOR_PID_MISMATCH');
+    return channel;
+  } catch (error) { channel.close(); throw error; }
+}
+
 async function bridgeStatus(settings: BridgeConfiguration, key: string): Promise<Record<string, unknown> | undefined> {
   try {
     const response = await fetch(`http://127.0.0.1:${settings.port}/__hotswap/bridge`, {
@@ -114,9 +140,9 @@ export async function attachLegacy(path: string): Promise<Record<string, unknown
   await verifyTarget(settings);
   const key = (await readPrivateFile(settings.keyFile)).trim();
   const existing = await bridgeStatus(settings, key);
-  if (existing) return { ...existing, unchanged: true, inspectorClosed: true };
   const before = await listeningSockets(settings.expectedPid);
   if (before.length !== 1 || before[0]?.port !== settings.port || !before[0]?.loopback) throw new RouteError('EXISTING_DEBUGGER_OR_UNKNOWN_LISTENER_REFUSED');
+  if (existing && existing.inspectorOpen === false) return { ...existing, unchanged: true, inspectorClosed: true };
   await verifyTarget(settings);
   process.kill(settings.expectedPid, 'SIGUSR1');
   let channel: InspectorChannel | undefined;
@@ -131,21 +157,7 @@ export async function attachLegacy(path: string): Promise<Record<string, unknown
       await delay(10);
     }
     if (!inspector) throw new RouteError('EXCLUSIVE_INSPECTOR_UNAVAILABLE');
-    const response = await fetch(`http://127.0.0.1:${inspector.port}/json/list`, { signal: AbortSignal.timeout(1500) });
-    const targets: unknown = await response.json();
-    if (!Array.isArray(targets) || targets.length !== 1) throw new RouteError('UNEXPECTED_INSPECTOR_TARGETS');
-    const rawUrl = object(targets[0]).webSocketDebuggerUrl;
-    if (typeof rawUrl !== 'string') throw new RouteError('INSPECTOR_ENDPOINT_MISSING');
-    const url = new URL(rawUrl);
-    if (url.protocol !== 'ws:' || url.hostname !== '127.0.0.1' || Number(url.port) !== inspector.port || url.username || url.password) throw new RouteError('UNTRUSTED_INSPECTOR_ENDPOINT');
-    const socket = new WebSocket(url);
-    await new Promise<void>((resolveOpen, reject) => {
-      const timer = setTimeout(() => { socket.close(); reject(new RouteError('INSPECTOR_CONNECT_TIMEOUT')); }, 3000);
-      socket.addEventListener('open', () => { clearTimeout(timer); resolveOpen(); }, { once: true });
-      socket.addEventListener('error', () => { clearTimeout(timer); reject(new RouteError('INSPECTOR_CONNECT_FAILED')); }, { once: true });
-    });
-    channel = new InspectorChannel(socket);
-    if (await channel.evaluate('process.pid') !== settings.expectedPid) throw new RouteError('INSPECTOR_PID_MISMATCH');
+    channel = await openOwnedInspector(settings, inspector);
     // A bounded cleanup guard is armed before importing any replacement code.
     // It also closes the inspector if this controller itself is interrupted.
     await channel.evaluate("(() => { const inspector = process.getBuiltinModule('inspector'); setTimeout(() => inspector.close(), 12000).unref(); return true; })()");
@@ -157,6 +169,12 @@ export async function attachLegacy(path: string): Promise<Record<string, unknown
     const adopted = object(await channel.evaluate(expression));
     if (typeof adopted.adoptionError === 'string') throw new RouteError(adopted.adoptionError);
   } finally {
+    // A failed initial connection may happen before the in-process close guard
+    // is armed. Reconnect only to this attempt's still-owned inode to close it;
+    // never replay the adoption or attach to an unrelated pre-existing debugger.
+    if (!channel && inspector) {
+      try { channel = await openOwnedInspector(settings, inspector); } catch { /* Closure must still be observed below. */ }
+    }
     if (channel) {
       try { await channel.evaluate("(() => { const inspector = process.getBuiltinModule('inspector'); setImmediate(() => inspector.close()); return true; })()"); } catch { /* Reconcile actual listener state below. */ }
       channel.close();
@@ -171,7 +189,7 @@ export async function attachLegacy(path: string): Promise<Record<string, unknown
   }
   if (!closed) throw new RouteError('INSPECTOR_CLOSURE_NOT_CONFIRMED');
   const installed = await bridgeStatus(settings, key);
-  if (!installed) throw new RouteError('ADOPTION_NOT_CONFIRMED');
+  if (!installed || installed.inspectorOpen !== false) throw new RouteError('ADOPTION_NOT_CONFIRMED');
   return { ...installed, inspectorClosed: true };
 }
 

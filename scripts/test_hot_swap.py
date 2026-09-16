@@ -200,7 +200,7 @@ class DeploymentTests(unittest.TestCase):
     def test_existing_and_cold_started_ingress_never_reopens_the_inspector(self):
         with fixture() as f:
             current_pid = 73088
-            receipt = {'bridgeAbi': 1, 'generation': f.a['generation']['id'], 'pid': current_pid, 'legacyAvailable': False}
+            receipt = {'bridgeAbi': 1, 'generation': f.a['generation']['id'], 'pid': current_pid, 'legacyAvailable': False, 'inspectorOpen': False}
             def command(*args, **kwargs):
                 self.assertFalse(any(str(arg).endswith('attach-legacy.js') for arg in args), 'existing ingress must not be reattached')
                 return SimpleNamespace(returncode=0, stdout='', stderr='')

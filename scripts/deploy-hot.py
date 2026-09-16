@@ -221,6 +221,8 @@ ExecStart={quote(original['identity']['executable'])} --import {quote(release / 
         installed = backend(original['generation'], router['keyFile'], '/__hotswap/bridge')
     except (ControlError, OSError):
         installed = None
+    if installed and installed.get('inspectorOpen') is not False:
+        raise ControlError('LEGACY_INSPECTOR_CLOSURE_NOT_CONFIRMED')
     if installed and installed.get('bridgeAbi') == 1 and installed.get('generation') == ingress['generation'] and str(installed.get('pid')) == current.get('MainPID'):
         pass  # Includes a cold-started ingress with legacyAvailable=false.
     elif current.get('ActiveState') != 'active':
@@ -240,7 +242,7 @@ ExecStart={quote(original['identity']['executable'])} --import {quote(release / 
             atomic_json(state_path(home), state)
             raise ControlError('LIVE_ADOPTION_NOT_CONFIRMED')
     receipt = backend(original['generation'], router['keyFile'], '/__hotswap/bridge')
-    if receipt.get('bridgeAbi') != 1 or receipt.get('generation') != ingress['generation']:
+    if receipt.get('bridgeAbi') != 1 or receipt.get('generation') != ingress['generation'] or receipt.get('inspectorOpen') is not False:
         raise ControlError('INGRESS_BRIDGE_IDENTITY_MISMATCH')
     # A cold-started ingress is valid for forwarding but cannot recover the old
     # backend's in-memory ownership. That legacy generation remains unavailable.

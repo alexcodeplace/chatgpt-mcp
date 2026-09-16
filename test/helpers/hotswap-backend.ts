@@ -39,3 +39,12 @@ const stop = () => {
   })();
 };
 process.once('SIGTERM', stop); process.once('disconnect', stop);
+
+// Explicit GC makes request-lifetime regressions deterministic, not load-based.
+process.on('message', message => {
+  if (message === 'collect-garbage') {
+    if (!global.gc) throw new Error('fixture requires --expose-gc');
+    global.gc();
+    setImmediate(() => { global.gc!(); process.send?.({ event: 'garbage-collected' }); });
+  }
+});

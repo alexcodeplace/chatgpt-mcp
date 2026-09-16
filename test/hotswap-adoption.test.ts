@@ -89,6 +89,8 @@ test('adopt the original listener under real traffic without replacing its PID, 
     assert.equal(a.child.exitCode, null); assert.equal(b.child.exitCode, null);
     console.log(JSON.stringify({ adoptionStage: 'same-socket-upgraded', continuousCycles: count }));
     phase = 'pre-adoption-cancellation';
+    const collected = once(a.child, 'message'); a.child.send('collect-garbage');
+    assert.equal((await collected)[0].event, 'garbage-collected');
     abort.abort(); assert.ok(await cancellable instanceof Error);
     const cancelledPid = Number(await f.read('pre-adoption-cancel.started'));
     const deadline = Date.now() + 10_000;

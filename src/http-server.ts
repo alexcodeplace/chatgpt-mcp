@@ -98,7 +98,11 @@ export function createComputerHttpServer(
     legacy: 'stateless',
     responseMode: 'json',
   });
-  const nodeHandler = toNodeHandler(handler);
+  // Node Request creates a weak dependent AbortSignal. Once handler.fetch()
+  // returns an SSE response, the SDK no longer necessarily holds that Request.
+  // Keep it strongly reachable until the response exchange ends; otherwise GC
+  // can detach disconnect cancellation from an already-running child process.
+  const retainedRequests = new Map<ServerResponse, Request>();
   const validate = validators(config);
   const keyPath = process.env.CHATGPT_MCP_ROUTER_KEY_FILE;
   const routerKey = keyPath ? readFileSync(keyPath, 'utf8').trim() : undefined;
@@ -170,6 +174,12 @@ export function createComputerHttpServer(
     // Node's IncomingMessage types model `method` as optional, while the MCP
     // node bridge models it as required. A real server request has a method;
     // the guard above makes this cast the explicit type seam between the two.
+    const nodeHandler = toNodeHandler({
+      fetch(request, options) {
+        retainedRequests.set(res, request);
+        return handler.fetch(request, options);
+      },
+    });
     exchanges += 1;
     withDiagnosticRequest(() => {
       const requestId = diagnosticId();
@@ -180,7 +190,7 @@ export function createComputerHttpServer(
         trace('http_handler_failed', { requestId });
         if (!res.headersSent && !res.destroyed) writeJson(res, 500, { error: 'backend_handler_failure', diagnosticId: requestId });
         else if (!res.destroyed) res.end();
-      }).finally(() => { exchanges -= 1; });
+      }).finally(() => { retainedRequests.delete(res); exchanges -= 1; });
     });
   });
 

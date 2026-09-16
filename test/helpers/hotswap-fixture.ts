@@ -74,12 +74,12 @@ export async function fixture(extra: Json = {}, persist?: RouterOptions['persist
   const options: RouterOptions = { config, key, port: 0, controlSocket: socket, statePath: join(root, 'registry.json'), ...(persist ? { persist } : {}) };
   let router: RunningRouter = await startRouter(options);
   const children: ChildProcess[] = [];
-  const spawn = async (letter: string, port = 0, preload?: string, bridgeConfig?: string): Promise<{ child: ChildProcess; generation: Generation; runtime: Json }> => {
+  const spawn = async (letter: string, port = 0, preload?: string, bridgeConfig?: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ child: ChildProcess; generation: Generation; runtime: Json }> => {
     const source = import.meta.url.endsWith('.ts');
     const child = fork(fileURLToPath(new URL('./hotswap-backend' + (source ? '.ts' : '.js'), import.meta.url)), [configPath, String(port)], {
-      execArgv: [...(source ? ['--import', 'tsx'] : []), ...(preload ? ['--import', preload] : [])], stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      execArgv: ['--expose-gc', ...(source ? ['--import', 'tsx'] : []), ...(preload ? ['--import', preload] : [])], stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: { ...process.env, CHATGPT_MCP_CONFIG: configPath, CHATGPT_MCP_RELEASE: letter.repeat(40), CHATGPT_MCP_ROUTER_KEY_FILE: keyFile,
-        ...(bridgeConfig ? { CHATGPT_MCP_BRIDGE_CONFIG: bridgeConfig } : {}) },
+        ...(bridgeConfig ? { CHATGPT_MCP_BRIDGE_CONFIG: bridgeConfig } : {}), ...extraEnv },
     });
     children.push(child);
     let errors = ''; child.stderr?.on('data', chunk => { errors += String(chunk); });

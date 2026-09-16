@@ -1,3 +1,4 @@
+import { url as inspectorUrl } from 'node:inspector';
 import { createHash } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
 import { request, Server, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -85,7 +86,9 @@ export function installBridge(server: Server, prepared: PreparedBridge): Receipt
     try {
       if (!prepared.validate.host(req, res) || !prepared.validate.origin(req, res)) return;
       const internal = equalSecret(req.headers['x-mcp-route-key'], prepared.key);
-      if (internal && req.url === '/__hotswap/bridge' && req.method === 'GET') { json(res, 200, receipt); return; }
+      if (internal && req.url === '/__hotswap/bridge' && req.method === 'GET') {
+        json(res, 200, { ...receipt, inspectorOpen: inspectorUrl() !== undefined }); return;
+      }
       if (internal && req.headers['x-mcp-route-instance'] !== undefined) {
         if (!prepared.legacyAvailable || req.headers['x-mcp-route-instance'] !== prepared.settings.id) {
           json(res, 409, { error: 'LEGACY_GENERATION_GONE' }); return;
