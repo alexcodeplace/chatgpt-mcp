@@ -324,6 +324,8 @@ def materialize_bootstrap(profile, tunnel, directory, backend_url, config):
 
 def deploy(args):
     home = pathlib.Path.home()
+    if (home / '.local/state/chatgpt-mcp/hotswap/deployment.json').exists():
+        raise ValueError('managed hot-swap ingress already owns this runtime; use Overdeck or deploy-hot.py, never tunnel cutover')
     release = args.release.resolve()
     manifest = verify(release)
     revision = manifest['revision']

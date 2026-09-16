@@ -94,6 +94,7 @@ export interface ComputerAdapter {
   classifyExec?(request: ExecRequest): ShellExecutionClass;
   exec(request: ExecRequest): Promise<ExecResult>;
   executionMetrics?(): Record<string, unknown>;
+  ownedResources?(): { applications: number; recordings: number };
   listProcesses(): Promise<readonly ProcessInfo[]>;
   killProcess(pid: number, signal?: NodeJS.Signals): Promise<void>;
   serviceStatus(name: string): Promise<ServiceStatus>;

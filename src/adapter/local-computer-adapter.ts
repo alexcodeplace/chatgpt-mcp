@@ -118,6 +118,7 @@ function validateDisplay(display: string, operation: string): string {
 
 export class LocalComputerAdapter implements ComputerAdapter {
   private readonly applications = new Map<string, ChildProcess>();
+  private readonly closingApplications = new Map<string, ChildProcess>();
   private readonly screenRecordings = new Map<string, ActiveScreenRecording>();
 
   constructor(private readonly config: Readonly<ChatGptMcpConfig>) {}
@@ -397,9 +398,16 @@ export class LocalComputerAdapter implements ComputerAdapter {
   }
 
   private pruneApplications(): void {
-    for (const [handle, child] of this.applications) {
-      if (child.exitCode !== null || child.signalCode !== null) this.applications.delete(handle);
+    for (const owned of [this.applications, this.closingApplications]) {
+      for (const [handle, child] of owned) {
+        if (child.exitCode !== null || child.signalCode !== null) owned.delete(handle);
+      }
     }
+  }
+
+  ownedResources(): { applications: number; recordings: number } {
+    this.pruneApplications();
+    return { applications: this.applications.size + this.closingApplications.size, recordings: this.screenRecordings.size };
   }
 
   async launchApplication(name: string, args: readonly string[], display: string): Promise<ApplicationLaunchResult> {
@@ -419,7 +427,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
 
     this.pruneApplications();
-    if (this.applications.size >= this.config.application.maxTracked) {
+    if (this.applications.size + this.closingApplications.size >= this.config.application.maxTracked) {
       throw adapterError('OUTPUT_LIMIT', operation, 'Tracked application handle limit reached.', {
         maximum: this.config.application.maxTracked,
       });
@@ -452,11 +460,13 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.application.enabled, operation, 'Application closing is disabled.');
     const child = this.applications.get(handle);
     if (child === undefined) throw adapterError('NOT_FOUND', operation, 'Application handle is unknown or expired.', { handle });
-    this.applications.delete(handle);
     if (child.exitCode !== null || child.signalCode !== null) {
+      this.applications.delete(handle);
       throw adapterError('NOT_FOUND', operation, 'Application has already exited.', { handle, pid: child.pid });
     }
     try {
+      this.applications.delete(handle);
+      this.closingApplications.set(handle, child);
       if (!child.kill('SIGTERM')) {
         throw adapterError('OS_ERROR', operation, 'Operating system did not accept the application termination signal.', {
           handle,
@@ -464,6 +474,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
         });
       }
     } catch (error) {
+      this.closingApplications.delete(handle);
+      this.applications.set(handle, child);
       mapOsError(error, operation, { handle, pid: child.pid });
     }
   }
@@ -702,9 +714,12 @@ export class LocalComputerAdapter implements ComputerAdapter {
     } catch (error) {
       return mapOsError(error, operation, { handle, path, display });
     } finally {
-      this.screenRecordings.delete(handle);
-      child.stdin?.destroy();
-      child.stderr?.destroy();
+      // A failed termination is still owned until the child actually exits.
+      if (child.exitCode !== null || child.signalCode !== null) {
+        this.screenRecordings.delete(handle);
+        child.stdin?.destroy();
+        child.stderr?.destroy();
+      }
     }
   }
 

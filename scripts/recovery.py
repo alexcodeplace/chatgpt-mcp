@@ -331,6 +331,8 @@ def tick(settings, dry_run=False):
         for name, unit, status, evidence in samples:
             previous = state["components"].get(name, {})
             component, action = decision(previous, status, now, policy)
+            if name == 'backend' and settings.get('hotSwap') and action == 'restart':
+                action = 'route_recovery'
             component["evidence"] = evidence
             state["components"][name] = component
             report = {"component": name, "status": status, "phase": component["phase"], "action": action}
@@ -345,7 +347,15 @@ def tick(settings, dry_run=False):
                             "open": component["incidentOpen"], "status": status, "phase": component["phase"],
                             "restarts": component["restarts"], "evidence": evidence}
                 atomic_json(state_dir / "incidents" / (incident["id"] + ".json"), incident)
-            if action == "restart":
+            if action == 'route_recovery':
+                from hot_control import recover_backend
+                try:
+                    recovered = recover_backend(settings)
+                    component['routeRecovery'] = recovered
+                    component['restartAccepted'] = recovered.get('accepted', False)
+                except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
+                    component['restartAccepted'] = False
+            elif action == "restart":
                 try:
                     subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True, timeout=5)
                     proc = subprocess.run(["systemctl", "--user", "restart", "--no-block", unit], capture_output=True, timeout=5)

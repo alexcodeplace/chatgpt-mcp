@@ -1,3 +1,4 @@
+import { instanceId, routingAbi, jobsAbi, policyFingerprint } from './hotswap/identity.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ChatGptMcpConfig } from './config.js';
@@ -22,7 +23,8 @@ export function runtimeIdentity(config: Readonly<ChatGptMcpConfig>): Record<stri
   }
   return { release: process.env.CHATGPT_MCP_RELEASE ?? 'development', pid: process.pid, startedAt,
     observedAt: new Date().toISOString(), configFingerprint: hash, durableJobs: config.jobs.enabled && config.shell.enabled,
-    jobLauncher: config.jobs.launcher };
+    jobLauncher: config.jobs.launcher,
+    hotSwap: { instanceId, routingAbi, jobsAbi, policyFingerprint: policyFingerprint(config) } };
 }
 
 export function errorCategory(code: string): string {

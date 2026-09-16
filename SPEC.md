@@ -715,3 +715,8 @@ This is independent of the verbatim-output contract above: ordinary filesystem
 and shell tools are not modified or censored by the key-manager adapter. Its
 name-only API projects a defined response schema; it is not a replacement
 redaction wrapper around other tools.
+
+
+## Hot-swappable managed runtime
+
+[Live backend replacement](docs/specs/HOT-SWAP.md) is the owner-directed contract for continuous tunnel/router operation, per-generation ownership, cancellation, rollback and Overdeck host/VM deployment. It supersedes idle-window tunnel cutover for managed backend updates.
