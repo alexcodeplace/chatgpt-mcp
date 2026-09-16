@@ -123,8 +123,16 @@ test('adopt the original listener under real traffic without replacing its PID, 
     assert.ok(count > 0);
     const foreign = await fetch(originalUrl + '/healthz', { headers: { origin: 'https://foreign.invalid' } });
     assert.equal(foreign.status, 403, 'the bridge must not erase origin validation');
-    const foreignHost = await fetch(originalUrl + '/healthz', { headers: { host: 'foreign.invalid' } });
-    assert.equal(foreignHost.status, 403, 'the bridge must preserve Host validation too');
+    const foreignHost = await new Promise<number>((resolveStatus, reject) => {
+      // Fetch controls the Host header itself on supported Node versions. Use
+      // the native client and assert its actual outbound authority for this test.
+      const probe = request(originalUrl + '/healthz', { headers: { host: 'foreign.invalid' }, agent: false }, response => {
+        response.resume(); resolveStatus(response.statusCode ?? 0);
+      });
+      assert.equal(probe.getHeader('host'), 'foreign.invalid');
+      probe.once('error', reject); probe.end();
+    });
+    assert.equal(foreignHost, 403, 'the bridge must preserve Host validation too');
     // This is a separate cold-start test, after the hot-upgrade proof completed.
     // Restarted ingress must not impersonate the previous backend incarnation.
     phase = 'separate-cold-start';
