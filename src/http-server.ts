@@ -171,9 +171,17 @@ export function createComputerHttpServer(
     // node bridge models it as required. A real server request has a method;
     // the guard above makes this cast the explicit type seam between the two.
     const transportAbort = new AbortController();
-    const disconnect = () => { if (!res.writableFinished) transportAbort.abort(); };
+    const disconnect = () => {
+      if (!res.writableFinished && !transportAbort.signal.aborted) transportAbort.abort();
+    };
+    // A response 'close' is useful but not the ownership boundary: after the
+    // request body is complete, client cancellation can be observed first on
+    // the native request socket. Anchor cancellation to both and remove the
+    // socket listener after a normal response so keep-alive reuse is unaffected.
     res.once('close', disconnect);
-    if (res.destroyed) transportAbort.abort();
+    req.once('aborted', disconnect);
+    req.socket.once('close', disconnect);
+    if (res.destroyed || req.destroyed || req.aborted || req.socket.destroyed) disconnect();
     exchanges += 1;
     withDiagnosticRequest(() => {
       const requestId = diagnosticId();
@@ -184,7 +192,12 @@ export function createComputerHttpServer(
         trace('http_handler_failed', { requestId });
         if (!res.headersSent && !res.destroyed) writeJson(res, 500, { error: 'backend_handler_failure', diagnosticId: requestId });
         else if (!res.destroyed) res.end();
-      }).finally(() => { res.off('close', disconnect); exchanges -= 1; });
+      }).finally(() => {
+        res.off('close', disconnect);
+        req.off('aborted', disconnect);
+        req.socket.off('close', disconnect);
+        exchanges -= 1;
+      });
     }, transportAbort.signal);
   });
 
