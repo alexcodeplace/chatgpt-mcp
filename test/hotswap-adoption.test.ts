@@ -88,6 +88,18 @@ test('adopt the original listener under real traffic without replacing its PID, 
     assert.equal(installed.inspectorClosed, true); assert.equal(installed.pid, a.child.pid);
     assert.equal((await listeningSockets(a.child.pid!)).length, 1, 'no debugger listener may remain');
     assert.equal((await attachLegacy(bridgePath)).unchanged, true);
+    const ownerOpened = once(a.child, 'message'); a.child.send('open-owner-debugger');
+    assert.equal((await ownerOpened)[0].event, 'owner-debugger-open');
+    await assert.rejects(attachLegacy(bridgePath), /EXISTING_DEBUGGER_OR_UNKNOWN_LISTENER_REFUSED/);
+    const cannotCloseOwner = await fetch(originalUrl + '/__hotswap/bridge/finalize-adoption', {
+      method: 'POST', headers: { 'x-mcp-route-key': f.key, 'x-mcp-route-instance': a.generation.id },
+    });
+    assert.equal(cannotCloseOwner.status, 409, 'a completed adoption cannot close a later owner debugger');
+    await cannotCloseOwner.body?.cancel();
+    assert.equal((await listeningSockets(a.child.pid!)).length, 2);
+    const ownerClosed = once(a.child, 'message'); a.child.send('close-owner-debugger');
+    assert.equal((await ownerClosed)[0].event, 'owner-debugger-closed');
+
     phase = 'activate-and-existing-connection';
     await f.activate(b.generation);
     const switched = await warmCall(originalUrl, agent);

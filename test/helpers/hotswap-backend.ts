@@ -1,3 +1,4 @@
+import { open as openInspector, close as closeInspector } from 'node:inspector';
 import { readFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { parseConfig } from '../../src/config.js';
@@ -47,4 +48,9 @@ process.on('message', message => {
     global.gc();
     setImmediate(() => { global.gc!(); process.send?.({ event: 'garbage-collected' }); });
   }
+});
+
+process.on('message', message => {
+  if (message === 'open-owner-debugger') { openInspector(0, '127.0.0.1'); process.send?.({ event: 'owner-debugger-open' }); }
+  if (message === 'close-owner-debugger') { closeInspector(); process.send?.({ event: 'owner-debugger-closed' }); }
 });

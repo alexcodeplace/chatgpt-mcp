@@ -50,4 +50,25 @@ Run builds/tests in K3s with exact source and receipts. Produce the upstream imm
 
 ## Implementation record
 
-Pending. Worktrees: chatgpt-mcp task/hotswap-20260915; overdeck wt/mcp-hotswap-20260915.
+The implementation uses `src/hotswap/` plus the existing HTTP server, adapters,
+durable job store and recovery controller. `scripts/deploy-hot.py` owns staging
+and selection; the Overdeck workstation MCP module publishes its pin and deploys
+the same verified manager to the guest through the existing VM transport.
+
+September 16 verification identified and fixed two additional lifecycle defects:
+request cancellation must remain rooted in the native HTTP response rather than
+weak intermediate SDK Request objects, and the inspector WebSocket must fully
+disconnect before its synchronous shutdown runs on the backend event loop. The
+one-shot finalization capability closes only the exact inspector opened for that
+adoption; it cannot close a later owner debugger. Forced-GC, recorded process,
+rollback, compiled-runtime and owner-debugger refusal tests cover these seams.
+
+Release acceptance runs in `.github/workflows/gate.yml`; the corresponding
+immutable artifact is admitted only from the successful exact-revision run.
+`scripts/hot-live-proof.py` runs installed read/write/execute traffic during
+normal Overdeck synchronization and checks rollback, durable cancellation,
+unchanged tunnel/router PIDs and a verified no-op second apply. Actual deployment
+receipts live under `~/.local/state/overdeck/mcp/` on each enrolled target. An
+unexecuted or failed receipt is not installed acceptance. Desktop capture remains
+a separate capability: synthetic recording bytes prove owner routing and process
+finalization, not live screen capture or permission to enable a disabled desktop.

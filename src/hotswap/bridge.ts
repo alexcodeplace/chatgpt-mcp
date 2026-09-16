@@ -1,4 +1,4 @@
-import { url as inspectorUrl } from 'node:inspector';
+import { close as closeInspector, url as inspectorUrl } from 'node:inspector';
 import { createHash } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
 import { request, Server, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -22,6 +22,7 @@ export interface PreparedBridge {
   key: string;
   fingerprint: string;
   legacyAvailable: boolean;
+  adoptionInspectorUrl?: string;
 }
 interface Receipt { bridgeAbi: 1; pid: number; generation: string; legacyAvailable: boolean; port: number; unchanged: boolean }
 interface Installed { fingerprint: string; listener: (req: IncomingMessage, res: ServerResponse) => void; receipt: Receipt }
@@ -82,6 +83,18 @@ export function installBridge(server: Server, prepared: PreparedBridge): Receipt
     try {
       const internal = equalSecret(req.headers['x-mcp-route-key'], prepared.key);
       if (internal && req.url === '/__hotswap/bridge' && req.method === 'GET') {
+        json(res, 200, { ...receipt, inspectorOpen: inspectorUrl() !== undefined }); return;
+      }
+      if (internal && req.url === '/__hotswap/bridge/finalize-adoption' && req.method === 'POST') {
+        // Only the exact debugger owned by this one-time adoption may be closed.
+        // The controller first finishes its WebSocket disconnect: calling the
+        // synchronous inspector.close() before that can freeze the event loop.
+        if (!prepared.adoptionInspectorUrl || inspectorUrl() !== prepared.adoptionInspectorUrl
+          || req.headers['x-mcp-route-instance'] !== prepared.settings.id) {
+          json(res, 409, { error: 'ADOPTION_INSPECTOR_NOT_OWNED' }); return;
+        }
+        delete prepared.adoptionInspectorUrl;
+        closeInspector();
         json(res, 200, { ...receipt, inspectorOpen: inspectorUrl() !== undefined }); return;
       }
       if (internal && req.headers['x-mcp-route-instance'] !== undefined) {
@@ -147,6 +160,8 @@ export function installBridge(server: Server, prepared: PreparedBridge): Receipt
 /** Narrow one-time compatibility seam for already-running enrolled Node servers. */
 export async function adopt(path: string): Promise<Receipt> {
   const prepared = await prepareBridge(path);
+  const ownedInspector = inspectorUrl();
+  if (ownedInspector) prepared.adoptionInspectorUrl = ownedInspector;
   const handles = (process as NodeJS.Process & { _getActiveHandles?: () => unknown[] })._getActiveHandles?.();
   if (!handles) throw new RouteError('UNSUPPORTED_NODE_LISTENER_DISCOVERY');
   const servers = handles.filter((value): value is Server => {

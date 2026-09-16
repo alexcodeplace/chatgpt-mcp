@@ -94,7 +94,15 @@ class InspectorChannel {
       this.socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true, silent: true } }));
     });
   }
-  close() { this.socket.close(); }
+  async close(): Promise<void> {
+    if (this.socket.readyState === WebSocket.CLOSED) return;
+    await new Promise<void>((resolveClosed, reject) => {
+      const done = () => { clearTimeout(timer); resolveClosed(); };
+      const timer = setTimeout(() => { this.socket.removeEventListener('close', done); reject(new RouteError('INSPECTOR_DISCONNECT_NOT_CONFIRMED')); }, 3000);
+      this.socket.addEventListener('close', done, { once: true });
+      this.socket.close();
+    });
+  }
 }
 async function openOwnedInspector(settings: BridgeConfiguration, inspector: Listener): Promise<InspectorChannel> {
   if (await processIdentity(settings.expectedPid) !== settings.expectedIdentity
@@ -118,7 +126,7 @@ async function openOwnedInspector(settings: BridgeConfiguration, inspector: List
   try {
     if (await channel.evaluate('process.pid') !== settings.expectedPid) throw new RouteError('INSPECTOR_PID_MISMATCH');
     return channel;
-  } catch (error) { channel.close(); throw error; }
+  } catch (error) { await channel.close().catch(() => {}); throw error; }
 }
 
 async function bridgeStatus(settings: BridgeConfiguration, key: string): Promise<Record<string, unknown> | undefined> {
@@ -160,7 +168,7 @@ export async function attachLegacy(path: string): Promise<Record<string, unknown
     channel = await openOwnedInspector(settings, inspector);
     // A bounded cleanup guard is armed before importing any replacement code.
     // It also closes the inspector if this controller itself is interrupted.
-    await channel.evaluate("(() => { const inspector = process.getBuiltinModule('inspector'); setTimeout(() => inspector.close(), 12000).unref(); return true; })()");
+    await channel.evaluate("(() => { const inspector = process.getBuiltinModule('inspector'); const owned = inspector.url(); setTimeout(() => { if (inspector.url() === owned) inspector.close(); }, 12000).unref(); return true; })()");
     const extension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
     const modulePath = fileURLToPath(new URL('./bridge' + extension, import.meta.url));
     // Inspector evaluations have no dynamic-import callback. Use the normal
@@ -176,8 +184,18 @@ export async function attachLegacy(path: string): Promise<Record<string, unknown
       try { channel = await openOwnedInspector(settings, inspector); } catch { /* Closure must still be observed below. */ }
     }
     if (channel) {
-      try { await channel.evaluate("(() => { const inspector = process.getBuiltinModule('inspector'); setImmediate(() => inspector.close()); return true; })()"); } catch { /* Reconcile actual listener state below. */ }
-      channel.close();
+      // Disconnect before closing the inspector from the ordinary event loop.
+      // Closing it through its own WebSocket races a synchronous shutdown wait.
+      try {
+        await channel.evaluate("(() => { const inspector = process.getBuiltinModule('inspector'); const owned = inspector.url(); setTimeout(() => { if (inspector.url() === owned) inspector.close(); }, 12000).unref(); return true; })()");
+      } catch { /* The earlier crash guard may already be armed. */ }
+      await channel.close();
+      try {
+        const finalized = await fetch(`http://127.0.0.1:${settings.port}/__hotswap/bridge/finalize-adoption`, {
+          method: 'POST', headers: { 'x-mcp-route-key': key, 'x-mcp-route-instance': settings.id }, signal: AbortSignal.timeout(3000),
+        });
+        await finalized.body?.cancel();
+      } catch { /* Failed adoption has no bridge; its owned crash guard closes it. */ }
     }
     if (inspector) {
       const deadline = Date.now() + 14_000;
