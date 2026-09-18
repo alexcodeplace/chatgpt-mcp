@@ -8,7 +8,7 @@ import { adapterError, isComputerAdapterError } from '../errors.js';
 import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
 import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
-import { authorizeCommand, authorizeHostDisplaySafeInvocation, clampRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
+import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
 import type {
   ApplicationLaunchResult,
   ComputerAdapter,
@@ -23,6 +23,7 @@ import type {
   ScreenRecordingStopResult,
   ServiceAction,
   ServiceStatus,
+  ShellExecutionClass,
   SystemInfo,
 } from './computer-adapter.js';
 
@@ -247,6 +248,12 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
+  classifyExec(request: ExecRequest): ShellExecutionClass {
+    const defaultRuntimeMs = this.config.shell.defaultRuntimeMs ?? Math.min(30_000, this.config.shell.maxRuntimeMs);
+    const runtimeMs = effectiveShellRuntime(request.timeoutMs, defaultRuntimeMs, this.config.shell.maxRuntimeMs);
+    return runtimeMs > defaultRuntimeMs ? 'shell-local-long' : 'shell-local';
+  }
+
   async exec(request: ExecRequest): Promise<ExecResult> {
     const operation = 'shell.exec';
     authorizeCommand(request.command, request.args, this.config.shell);
@@ -263,7 +270,11 @@ export class LocalComputerAdapter implements ComputerAdapter {
     const options = {
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
-      timeoutMs: clampRuntime(request.timeoutMs, this.config.shell.maxRuntimeMs),
+      timeoutMs: effectiveShellRuntime(
+        request.timeoutMs,
+        this.config.shell.defaultRuntimeMs ?? Math.min(30_000, this.config.shell.maxRuntimeMs),
+        this.config.shell.maxRuntimeMs,
+      ),
       maxOutputBytes: this.config.shell.maxOutputBytes,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
       operation,

@@ -21,8 +21,13 @@ const shellSchema = z.object({
   enabled: z.boolean().default(false),
   allowedCommands: z.array(z.string().min(1)).default([]),
   maxRuntimeMs: z.number().int().positive().max(60 * 60 * 1000).default(120_000),
+  defaultRuntimeMs: z.number().int().positive().max(60 * 60 * 1000).optional(),
   maxOutputBytes: z.number().int().positive().max(64 * 1024 * 1024).default(4 * 1024 * 1024),
   allowEnvironment: z.boolean().default(false),
+}).superRefine((value, ctx) => {
+  if (value.defaultRuntimeMs !== undefined && value.defaultRuntimeMs > value.maxRuntimeMs) {
+    ctx.addIssue({ code: 'custom', path: ['defaultRuntimeMs'], message: 'defaultRuntimeMs must not exceed maxRuntimeMs' });
+  }
 });
 
 const processSchema = z.object({
@@ -188,6 +193,7 @@ const concurrencySchema = z.object({
   maxConcurrent: z.number().int().min(2).max(1024).default(48),
   reservedControlSlots: z.number().int().min(0).max(1023).default(8),
   shellMaxConcurrent: z.number().int().positive().max(1024).default(8),
+  reservedInteractiveShellSlots: z.number().int().min(0).max(1023).optional(),
   maxQueue: z.number().int().positive().max(4096).default(64),
   queueTimeoutMs: z.number().int().positive().max(10 * 60 * 1000).default(30_000),
 }).superRefine((value, ctx) => {
@@ -196,6 +202,9 @@ const concurrencySchema = z.object({
   }
   if (value.shellMaxConcurrent > value.maxConcurrent - value.reservedControlSlots) {
     ctx.addIssue({ code: 'custom', path: ['shellMaxConcurrent'], message: 'shellMaxConcurrent must fit inside non-control concurrency capacity' });
+  }
+  if (value.reservedInteractiveShellSlots !== undefined && value.reservedInteractiveShellSlots >= value.shellMaxConcurrent) {
+    ctx.addIssue({ code: 'custom', path: ['reservedInteractiveShellSlots'], message: 'reservedInteractiveShellSlots must be less than shellMaxConcurrent' });
   }
 });
 
@@ -258,6 +267,14 @@ function normalize(config: ChatGptMcpConfig): ChatGptMcpConfig {
       ...config.filesystem,
       roots: config.filesystem.roots.map(root => resolve(root)),
       blocklist: config.filesystem.blocklist.map(rule => ({ ...rule, path: resolve(rule.path) })),
+    },
+    shell: {
+      ...config.shell,
+      defaultRuntimeMs: config.shell.defaultRuntimeMs ?? Math.min(30_000, config.shell.maxRuntimeMs),
+    },
+    concurrency: {
+      ...config.concurrency,
+      reservedInteractiveShellSlots: config.concurrency.reservedInteractiveShellSlots ?? Math.min(2, Math.max(0, config.concurrency.shellMaxConcurrent - 1)),
     },
     browser: {
       ...config.browser,
