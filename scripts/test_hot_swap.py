@@ -180,7 +180,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertFalse(any(call.args[0] in ['restart', 'stop', 'disable'] for call in calls.call_args_list))
             self.assertEqual([path for path, _ in f.route.calls].count('/activate'), 1)
 
-    def _policy_maintenance_fixture(self, f, health='HEALTHY'):
+    def _policy_maintenance_fixture(self, f, inventory_ok=True):
         f.b['generation']['policyFingerprint'] = '2' * 64
         f.state['generations'][f.b['generation']['id']] = f.b
         f.state['profiles'] = [{'name': 'profile', 'unit': 'tunnel.service', 'healthUrl': 'http://127.0.0.1:8080'}]
@@ -210,7 +210,7 @@ class DeploymentTests(unittest.TestCase):
         def control(socket_path, path='/status', data=None):
             registry = hot.read_json(registry_path)
             if path == '/inventory':
-                return {'instanceId': data['id']}
+                return {'instanceId': data['id'] if inventory_ok else 'f' * 32}
             return {**registry, 'routerPid': router_pid['value'],
                     'generations': [{**item, 'inFlight': 0,
                                      'ownership': 'legacy-retained' if item.get('legacy') else 'query-backend-inventory'}
@@ -226,8 +226,8 @@ class DeploymentTests(unittest.TestCase):
         stack.enter_context(mock.patch.object(deploy, 'ensure_router', side_effect=lambda *_: control('socket')))
         stack.enter_context(mock.patch.object(deploy, 'profiles_snapshot', return_value=before))
         stack.enter_context(mock.patch.object(deploy.stager, 'wait_poll'))
-        stack.enter_context(mock.patch.object(deploy, 'backend_probe',
-                                              return_value=(health, {'writeCanary': 'passed', 'shellCanary': 'passed'})))
+        stack.enter_context(mock.patch.object(deploy.stager, 'run',
+                                              return_value=SimpleNamespace(returncode=0, stdout='', stderr='')))
         return SimpleNamespace(stack=stack, before=before, old_registry=old_registry, old_config=old_config,
                                registry_path=registry_path, calls=service_calls,
                                active={**f.active, 'profiles': f.state['profiles']},
@@ -250,20 +250,27 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(sum('--signal=SIGSTOP' in call for call in signals), 2)
             self.assertEqual(sum('--signal=SIGCONT' in call for call in signals), 2)
             self.assertFalse(any(call[:2] == ('restart', 'tunnel.service') for call in seam.calls))
+            plan = hot.read_json(Path(f.b['deploymentDirectory']) / 'policy-maintenance-plan.json')
+            self.assertTrue(plan['committed'])
+            self.assertFalse(plan['rolledBack'])
+            self.assertTrue(any(call[:2] == ('stop', plan['guardUnit'] + '.timer') for call in seam.calls))
 
-    def test_policy_maintenance_failed_canary_restores_old_policy_before_resume(self):
+    def test_policy_maintenance_failed_precommit_validation_restores_old_policy_before_resume(self):
         with fixture() as f:
-            seam = self._policy_maintenance_fixture(f, health='EXECUTION_FAILURE')
+            seam = self._policy_maintenance_fixture(f, inventory_ok=False)
             with seam.stack:
-                with self.assertRaisesRegex(hot.ControlError, 'CANARY_FAILED'):
+                with self.assertRaisesRegex(hot.ControlError, 'CANDIDATE_MISMATCH'):
                     deploy.policy_maintenance(f.home, f.state, seam.active, f.b, seam.before, seam.ingress)
             self.assertEqual(hot.read_json(seam.registry_path), seam.old_registry)
             self.assertEqual(hot.read_json(f.state['router']['configPath']), seam.old_config)
             active = hot.read_json(f.home / '.config/chatgpt-mcp/active.json')
             self.assertEqual(active['revision'], f.a['generation']['revision'])
             signals = [call for call in seam.calls if call and call[0] == 'kill']
-            self.assertEqual(sum('--signal=SIGSTOP' in call for call in signals), 2)
+            self.assertGreaterEqual(sum('--signal=SIGSTOP' in call for call in signals), 2)
             self.assertEqual(sum('--signal=SIGCONT' in call for call in signals), 2)
+            plan = hot.read_json(Path(f.b['deploymentDirectory']) / 'policy-maintenance-plan.json')
+            self.assertTrue(plan['rolledBack'])
+            self.assertFalse(plan['committed'])
 
     def test_stale_overdeck_pin_stops_only_the_never_published_candidate(self):
         with fixture() as f, deployment_seams(f) as calls:

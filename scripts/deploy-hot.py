@@ -430,47 +430,114 @@ def _policy_registry(snapshot, candidate):
     return registry
 
 
-def policy_maintenance(home, state, active, record, before, ingress):
-    """Switch capability policy at a bounded maintenance boundary.
+def _pause_expected(item):
+    observed = _pause_unit(item['unit'])
+    if observed['pid'] != item['pid']:
+        raise ControlError('POLICY_MAINTENANCE_OWNER_CHANGED')
+    return observed
 
-    Tunnel and ingress processes are paused rather than restarted, so their exact
-    identities survive. The internal router is the only restarted owner. Traffic
-    is resumed only after registry/config persistence and candidate validation.
-    """
+
+def _maintenance_plan(home, state, record, tunnel_owners, ingress_owner, old_registry, old_config):
+    directory = Path(record['deploymentDirectory'])
+    registry_backup = directory / 'policy-registry-backup.json'
+    config_backup = directory / 'policy-router-config-backup.json'
+    plan_path = directory / 'policy-maintenance-plan.json'
+    atomic_json(registry_backup, old_registry)
+    atomic_json(config_backup, old_config)
+    guard = 'chatgpt-mcp-policy-rollback-' + record['generation']['id'][:12]
+    plan = {'schema': 1, 'home': str(home), 'lockPath': str(home / '.local/state/chatgpt-mcp/recovery/recovery.lock'),
+            'statePath': str(state_path(home)), 'registryPath': str(Path(state['router']['stateDirectory']) / 'registry.json'),
+            'configPath': state['router']['configPath'], 'registryBackup': str(registry_backup),
+            'configBackup': str(config_backup), 'routerUnit': state['router']['unit'],
+            'ingress': ingress_owner, 'tunnels': tunnel_owners, 'guardUnit': guard,
+            'committed': False, 'rolledBack': False}
+    atomic_json(plan_path, plan)
+    release = Path(record['releaseDirectory'])
+    stager.run('systemd-run', '--user', '--unit=' + guard, '--on-active=180s',
+               '/usr/bin/python3', str(release / 'scripts/deploy-hot.py'),
+               'policy-rollback', '--plan', str(plan_path))
+    return plan_path, plan
+
+
+def rollback_policy_maintenance(plan_path, locked=False):
+    plan_path = Path(plan_path)
+    plan = read_json(plan_path)
+    if plan.get('schema') != 1 or plan.get('committed') or plan.get('rolledBack'):
+        return {'status': 'unchanged'}
+    home = Path(plan['home'])
+    lock_path = Path(plan['lockPath'])
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def restore():
+        plan_now = read_json(plan_path)
+        if plan_now.get('committed') or plan_now.get('rolledBack'):
+            return {'status': 'unchanged'}
+        state = load_state(home)
+        for item in plan_now['tunnels']:
+            _pause_expected(item)
+        _wait_router_idle(state)
+        _pause_expected(plan_now['ingress'])
+        _wait_router_idle(state)
+        try:
+            stager.systemctl('stop', plan_now['routerUnit'], check=False)
+            atomic_json(plan_now['configPath'], read_json(plan_now['configBackup']))
+            atomic_json(plan_now['registryPath'], read_json(plan_now['registryBackup']))
+            ensure_router(home, state)
+            current = control(state['router']['controlSocket'])
+            publish_selection(home, state, current)
+            state['phase'] = 'active'
+            atomic_json(state_path(home), state)
+            plan_now['rolledBack'] = True
+            atomic_json(plan_path, plan_now)
+        finally:
+            _resume_unit(plan_now['ingress'])
+            for item in plan_now['tunnels']:
+                _resume_unit(item)
+        return {'status': 'rolled-back'}
+
+    if locked:
+        return restore()
+    with lock_path.open('a+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return restore()
+
+
+def policy_maintenance(home, state, active, record, before, ingress):
+    """Switch capability policy at a bounded, rollback-guarded maintenance boundary."""
     router = state['router']
     candidate = record['generation']
     snapshot = control(router['controlSocket'])
-    current = _selected_generation(snapshot)
-    if current['policyFingerprint'] == candidate['policyFingerprint']:
+    current_generation = _selected_generation(snapshot)
+    if current_generation['policyFingerprint'] == candidate['policyFingerprint']:
         raise ControlError('POLICY_MAINTENANCE_NOT_REQUIRED')
 
-    tunnel_paused = []
-    ingress_paused = None
+    tunnel_owners = [{'unit': profile['unit'], 'pid': next(item['pid'] for item in before if item['name'] == profile['name'])}
+                     for profile in active['profiles']]
+    ingress_owner = {'unit': state['ingress']['unit'], 'pid': ingress['pid']}
     registry_path = Path(router['stateDirectory']) / 'registry.json'
     old_registry = read_json(registry_path)
     old_config = read_json(router['configPath'])
-    router_mutated = False
+    plan_path, plan = _maintenance_plan(home, state, record, tunnel_owners, ingress_owner, old_registry, old_config)
     traffic_paused = False
-    ingress_owner = None
+    committed = False
     try:
-        for profile in active['profiles']:
-            tunnel_paused.append(_pause_unit(profile['unit']))
+        for item in tunnel_owners:
+            _pause_expected(item)
         snapshot = _wait_router_idle(state)
-        if snapshot['active'] != current['id']:
+        if snapshot['active'] != current_generation['id']:
             raise ControlError('POLICY_MAINTENANCE_ROUTE_CHANGED')
-        ingress_paused = _pause_unit(state['ingress']['unit'])
-        ingress_owner = ingress_paused
+        _pause_expected(ingress_owner)
         traffic_paused = True
         snapshot = _wait_router_idle(state)
-        if snapshot['active'] != current['id']:
+        if snapshot['active'] != current_generation['id']:
             raise ControlError('POLICY_MAINTENANCE_ROUTE_CHANGED')
 
         desired = read_json(record['settings']['configPath'])
         next_registry = _policy_registry(snapshot, candidate)
+        router_pid_before = snapshot['routerPid']
         stager.systemctl('stop', router['unit'])
         atomic_json(router['configPath'], desired)
         atomic_json(registry_path, next_registry)
-        router_mutated = True
         restarted = ensure_router(home, state)
         current = control(router['controlSocket'])
         if current.get('active') != candidate['id']:
@@ -480,60 +547,50 @@ def policy_maintenance(home, state, active, record, before, ingress):
             raise ControlError('POLICY_MAINTENANCE_CANDIDATE_MISMATCH')
 
         selected = publish_selection(home, state, current)
+        if selected['revision'] != candidate['revision']:
+            raise ControlError('POLICY_MAINTENANCE_SELECTION_MISMATCH')
         state['phase'] = 'active'
         atomic_json(state_path(home), state)
-        recovery = read_json(home / '.config/chatgpt-mcp/recovery.json')
-        health, evidence = backend_probe(recovery, canary=True)
-        if health != 'HEALTHY' or selected['revision'] != candidate['revision']:
-            raise ControlError('POLICY_MAINTENANCE_CANARY_FAILED')
+
+        # The independent timer may restore old policy only until this durable
+        # commit. After admissions reopen, cross-policy rollback is forbidden.
+        plan['committed'] = True
+        atomic_json(plan_path, plan)
+        committed = True
+        stager.systemctl('stop', plan['guardUnit'] + '.timer', check=False)
 
         _resume_unit(ingress_owner)
-        for item in tunnel_paused:
+        for item in tunnel_owners:
             _resume_unit(item)
         traffic_paused = False
         for profile in active['profiles']:
             stager.wait_poll(profile['healthUrl'])
 
         after = profiles_snapshot(home, active['profiles'], state['ingress']['url'])
-        if after != before or ingress.get('pid') != int(unit_state(state['ingress']['unit']).get('MainPID', '0')):
+        if after != before or ingress['pid'] != int(unit_state(state['ingress']['unit']).get('MainPID', '0')):
             raise ControlError('POLICY_MAINTENANCE_OWNER_CHANGED')
         result = {'status': 'policy-maintenance-cutover', 'revision': candidate['revision'],
                   'activeGeneration': current['active'], 'previousGeneration': None, 'epoch': current['epoch'],
-                  'routerPidBefore': snapshot['routerPid'], 'routerPid': restarted['routerPid'],
-                  'routerRestarted': restarted['routerPid'] != snapshot['routerPid'],
+                  'routerPidBefore': router_pid_before, 'routerPid': restarted['routerPid'],
+                  'routerRestarted': restarted['routerPid'] != router_pid_before,
                   'ingressPid': ingress['pid'], 'tunnels': after, 'oldBackendsRetained': True,
-                  'finalCanaries': {key: evidence[key] for key in ['writeCanary', 'shellCanary'] if key in evidence}}
+                  'finalCanaries': {'privateCandidate': 'passed', 'routerInventory': 'passed'}}
         atomic_json(Path(record['deploymentDirectory']) / 'hot-attempt.json', {'phase': 'active', **result})
         atomic_json(Path(router['stateDirectory']) / 'last-upgrade.json', result)
         return result
     except BaseException as failure:
-        try:
-            if not traffic_paused:
-                # A late fresh-poll/identity failure must close admissions again
-                # before restoring the old routing policy.
-                for item in tunnel_paused:
-                    _pause_unit(item['unit'])
-                _wait_router_idle(state)
-                _pause_unit(ingress_owner['unit'])
-                _wait_router_idle(state)
-                traffic_paused = True
-            if router_mutated:
-                stager.systemctl('stop', router['unit'], check=False)
-                atomic_json(router['configPath'], old_config)
-                atomic_json(registry_path, old_registry)
-                restored = ensure_router(home, state)
-                current = control(router['controlSocket'])
-                publish_selection(home, state, current)
-                state['phase'] = 'active'
-                atomic_json(state_path(home), state)
-                if restored.get('active') != old_registry.get('active') or current.get('active') != old_registry.get('active'):
-                    raise ControlError('POLICY_MAINTENANCE_ROLLBACK_FAILED')
-        finally:
-            if traffic_paused:
-                _resume_unit(ingress_owner)
-                for item in tunnel_paused:
-                    _resume_unit(item)
+        if not committed:
+            rollback_policy_maintenance(plan_path, locked=True)
+            traffic_paused = False
+            stager.systemctl('stop', plan['guardUnit'] + '.timer', check=False)
+        elif traffic_paused:
+            # A committed policy is never rewound. Resume exact owners and
+            # surface the post-commit convergence failure for reconciliation.
+            _resume_unit(ingress_owner)
+            for item in tunnel_owners:
+                _resume_unit(item)
         raise failure
+
 
 
 def activate_candidate(home, release, node, target, active, record, before):
@@ -605,14 +662,19 @@ def activate_candidate(home, release, node, target, active, record, before):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['deploy', 'status', 'rollback', 'activate'])
+    parser.add_argument('action', choices=['deploy', 'status', 'rollback', 'activate', 'policy-rollback'])
     parser.add_argument('--release', type=Path)
     parser.add_argument('--target', type=Path)
     parser.add_argument('--generation')
+    parser.add_argument('--plan', type=Path)
     args = parser.parse_args()
     home = Path.home()
     if args.action == 'status':
         result = status(home)
+    elif args.action == 'policy-rollback':
+        if not args.plan:
+            parser.error('policy-rollback requires --plan')
+        result = rollback_policy_maintenance(args.plan)
     elif args.action == 'deploy':
         if not args.release or not args.target:
             parser.error('deploy requires --release and --target')
