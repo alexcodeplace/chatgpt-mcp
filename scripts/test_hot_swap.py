@@ -180,6 +180,91 @@ class DeploymentTests(unittest.TestCase):
             self.assertFalse(any(call.args[0] in ['restart', 'stop', 'disable'] for call in calls.call_args_list))
             self.assertEqual([path for path, _ in f.route.calls].count('/activate'), 1)
 
+    def _policy_maintenance_fixture(self, f, health='HEALTHY'):
+        f.b['generation']['policyFingerprint'] = '2' * 64
+        f.state['generations'][f.b['generation']['id']] = f.b
+        f.state['profiles'] = [{'name': 'profile', 'unit': 'tunnel.service', 'healthUrl': 'http://127.0.0.1:8080'}]
+        hot.atomic_json(hot.state_path(f.home), f.state)
+        registry_path = f.root / 'registry.json'
+        old_registry = {'schema': 1, 'epoch': 4, 'active': f.a['generation']['id'], 'previous': None,
+                        'legacyOwner': f.a['generation']['id'], 'generations': [copy.deepcopy(f.a['generation'])]}
+        hot.atomic_json(registry_path, old_registry)
+        old_config = hot.read_json(f.a['settings']['configPath'])
+        hot.atomic_json(f.state['router']['configPath'], old_config)
+        services = {'tunnel.service': 73101, f.a['generation']['unit']: 73102}
+        router_pid = {'value': 73103}
+        service_calls = []
+
+        def unit(name):
+            pid = services.get(name)
+            if pid is None:
+                return {'ActiveState': 'active', 'MainPID': str(router_pid['value'])}
+            return {'ActiveState': 'active', 'MainPID': str(pid)}
+
+        def systemctl(*args, **kwargs):
+            service_calls.append(args)
+            if args[:2] == ('stop', f.state['router']['unit']):
+                router_pid['value'] += 1
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        def control(socket_path, path='/status', data=None):
+            registry = hot.read_json(registry_path)
+            if path == '/inventory':
+                return {'instanceId': data['id']}
+            return {**registry, 'routerPid': router_pid['value'],
+                    'generations': [{**item, 'inFlight': 0,
+                                     'ownership': 'legacy-retained' if item.get('legacy') else 'query-backend-inventory'}
+                                    for item in registry['generations']]}
+
+        before = [{'name': 'profile', 'unit': 'tunnel.service', 'pid': 73101,
+                   'profileSha256': '3' * 64, 'unitSha256': {'x': '4' * 64}}]
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(deploy, 'unit_state', side_effect=unit))
+        stack.enter_context(mock.patch.object(deploy.stager, 'systemctl', side_effect=systemctl))
+        stack.enter_context(mock.patch.object(deploy, 'control', side_effect=control))
+        stack.enter_context(mock.patch.object(hot, 'control', side_effect=control))
+        stack.enter_context(mock.patch.object(deploy, 'ensure_router', side_effect=lambda *_: control('socket')))
+        stack.enter_context(mock.patch.object(deploy, 'profiles_snapshot', return_value=before))
+        stack.enter_context(mock.patch.object(deploy.stager, 'wait_poll'))
+        stack.enter_context(mock.patch.object(deploy, 'backend_probe',
+                                              return_value=(health, {'writeCanary': 'passed', 'shellCanary': 'passed'})))
+        return SimpleNamespace(stack=stack, before=before, old_registry=old_registry, old_config=old_config,
+                               registry_path=registry_path, calls=service_calls,
+                               active={**f.active, 'profiles': f.state['profiles']},
+                               ingress={'pid': services[f.a['generation']['unit']]})
+
+    def test_policy_maintenance_preserves_ingress_and_tunnel_pids_and_restarts_only_router(self):
+        with fixture() as f:
+            seam = self._policy_maintenance_fixture(f)
+            with seam.stack:
+                result = deploy.policy_maintenance(f.home, f.state, seam.active, f.b, seam.before, seam.ingress)
+            self.assertEqual(result['status'], 'policy-maintenance-cutover')
+            self.assertTrue(result['routerRestarted'])
+            self.assertEqual(result['ingressPid'], 73102)
+            self.assertEqual(result['tunnels'][0]['pid'], 73101)
+            registry = hot.read_json(seam.registry_path)
+            self.assertEqual(registry['active'], f.b['generation']['id'])
+            self.assertIsNone(registry['previous'])
+            self.assertEqual(set(registry['generations'][0]), {'id', 'url', 'revision', 'unit', 'policyFingerprint', 'legacy'})
+            signals = [call for call in seam.calls if call and call[0] == 'kill']
+            self.assertEqual(sum('--signal=SIGSTOP' in call for call in signals), 2)
+            self.assertEqual(sum('--signal=SIGCONT' in call for call in signals), 2)
+            self.assertFalse(any(call[:2] == ('restart', 'tunnel.service') for call in seam.calls))
+
+    def test_policy_maintenance_failed_canary_restores_old_policy_before_resume(self):
+        with fixture() as f:
+            seam = self._policy_maintenance_fixture(f, health='EXECUTION_FAILURE')
+            with seam.stack:
+                with self.assertRaisesRegex(hot.ControlError, 'CANARY_FAILED'):
+                    deploy.policy_maintenance(f.home, f.state, seam.active, f.b, seam.before, seam.ingress)
+            self.assertEqual(hot.read_json(seam.registry_path), seam.old_registry)
+            self.assertEqual(hot.read_json(f.state['router']['configPath']), seam.old_config)
+            active = hot.read_json(f.home / '.config/chatgpt-mcp/active.json')
+            self.assertEqual(active['revision'], f.a['generation']['revision'])
+            signals = [call for call in seam.calls if call and call[0] == 'kill']
+            self.assertEqual(sum('--signal=SIGSTOP' in call for call in signals), 2)
+            self.assertEqual(sum('--signal=SIGCONT' in call for call in signals), 2)
+
     def test_stale_overdeck_pin_stops_only_the_never_published_candidate(self):
         with fixture() as f, deployment_seams(f) as calls:
             hot.atomic_json(f.home / '.local/lib/overdeck-mcp-manager/current/pin.json', {'revision': 'c' * 40})

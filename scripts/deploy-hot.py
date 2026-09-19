@@ -364,6 +364,178 @@ def deploy(home, release, target):
         raise
 
 
+def _selected_generation(snapshot):
+    selected = snapshot.get('active')
+    item = next((value for value in snapshot.get('generations', []) if value.get('id') == selected), None)
+    if not item:
+        raise ControlError('ACTIVE_GENERATION_METADATA_MISSING')
+    return item
+
+
+def _wait_router_idle(state, timeout=90):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snapshot = control(state['router']['controlSocket'])
+        if all(item.get('inFlight', 0) == 0 for item in snapshot.get('generations', [])):
+            return snapshot
+        time.sleep(0.1)
+    raise ControlError('POLICY_MAINTENANCE_DRAIN_TIMEOUT')
+
+
+def _pause_unit(unit):
+    current = unit_state(unit)
+    pid = int(current.get('MainPID', '0'))
+    if current.get('ActiveState') != 'active' or pid <= 0:
+        raise ControlError('POLICY_MAINTENANCE_OWNER_NOT_RUNNING')
+    stager.systemctl('kill', '--kill-whom=main', '--signal=SIGSTOP', unit)
+    observed = unit_state(unit)
+    if observed.get('ActiveState') != 'active' or observed.get('MainPID') != str(pid):
+        raise ControlError('POLICY_MAINTENANCE_OWNER_CHANGED')
+    return {'unit': unit, 'pid': pid}
+
+
+def _resume_unit(item):
+    current = unit_state(item['unit'])
+    if current.get('ActiveState') != 'active' or current.get('MainPID') != str(item['pid']):
+        raise ControlError('POLICY_MAINTENANCE_OWNER_CHANGED')
+    stager.systemctl('kill', '--kill-whom=main', '--signal=SIGCONT', item['unit'])
+    observed = unit_state(item['unit'])
+    if observed.get('ActiveState') != 'active' or observed.get('MainPID') != str(item['pid']):
+        raise ControlError('POLICY_MAINTENANCE_OWNER_CHANGED')
+
+
+def _generation_descriptor(item):
+    result = {key: copy.deepcopy(item[key]) for key in ['id', 'url', 'revision', 'unit', 'policyFingerprint']}
+    if 'legacy' in item:
+        result['legacy'] = copy.deepcopy(item['legacy'])
+    return result
+
+
+def _policy_registry(snapshot, candidate):
+    registry = {key: copy.deepcopy(snapshot[key]) for key in ['schema', 'epoch', 'active', 'previous', 'legacyOwner']}
+    registry['generations'] = [_generation_descriptor(item) for item in snapshot['generations']]
+    descriptor = _generation_descriptor(candidate)
+    existing = next((item for item in registry['generations'] if item['id'] == descriptor['id']), None)
+    if existing and existing != descriptor:
+        raise ControlError('INCARNATION_ALREADY_REGISTERED')
+    if not existing:
+        if len(registry['generations']) >= 128:
+            raise ControlError('RETAINED_GENERATION_LIMIT')
+        registry['generations'].append(descriptor)
+    registry['epoch'] += 1
+    registry['active'] = descriptor['id']
+    # Rollback across a policy boundary is a separate maintenance operation.
+    # Retained old generations still own their opaque handles/resources.
+    registry['previous'] = None
+    return registry
+
+
+def policy_maintenance(home, state, active, record, before, ingress):
+    """Switch capability policy at a bounded maintenance boundary.
+
+    Tunnel and ingress processes are paused rather than restarted, so their exact
+    identities survive. The internal router is the only restarted owner. Traffic
+    is resumed only after registry/config persistence and candidate validation.
+    """
+    router = state['router']
+    candidate = record['generation']
+    snapshot = control(router['controlSocket'])
+    current = _selected_generation(snapshot)
+    if current['policyFingerprint'] == candidate['policyFingerprint']:
+        raise ControlError('POLICY_MAINTENANCE_NOT_REQUIRED')
+
+    tunnel_paused = []
+    ingress_paused = None
+    registry_path = Path(router['stateDirectory']) / 'registry.json'
+    old_registry = read_json(registry_path)
+    old_config = read_json(router['configPath'])
+    router_mutated = False
+    traffic_paused = False
+    ingress_owner = None
+    try:
+        for profile in active['profiles']:
+            tunnel_paused.append(_pause_unit(profile['unit']))
+        snapshot = _wait_router_idle(state)
+        if snapshot['active'] != current['id']:
+            raise ControlError('POLICY_MAINTENANCE_ROUTE_CHANGED')
+        ingress_paused = _pause_unit(state['ingress']['unit'])
+        ingress_owner = ingress_paused
+        traffic_paused = True
+        snapshot = _wait_router_idle(state)
+        if snapshot['active'] != current['id']:
+            raise ControlError('POLICY_MAINTENANCE_ROUTE_CHANGED')
+
+        desired = read_json(record['settings']['configPath'])
+        next_registry = _policy_registry(snapshot, candidate)
+        stager.systemctl('stop', router['unit'])
+        atomic_json(router['configPath'], desired)
+        atomic_json(registry_path, next_registry)
+        router_mutated = True
+        restarted = ensure_router(home, state)
+        current = control(router['controlSocket'])
+        if current.get('active') != candidate['id']:
+            raise ControlError('POLICY_MAINTENANCE_SELECTION_MISMATCH')
+        inventory = control(router['controlSocket'], '/inventory', {'id': candidate['id']})
+        if inventory.get('instanceId') != candidate['id']:
+            raise ControlError('POLICY_MAINTENANCE_CANDIDATE_MISMATCH')
+
+        selected = publish_selection(home, state, current)
+        state['phase'] = 'active'
+        atomic_json(state_path(home), state)
+        recovery = read_json(home / '.config/chatgpt-mcp/recovery.json')
+        health, evidence = backend_probe(recovery, canary=True)
+        if health != 'HEALTHY' or selected['revision'] != candidate['revision']:
+            raise ControlError('POLICY_MAINTENANCE_CANARY_FAILED')
+
+        _resume_unit(ingress_owner)
+        for item in tunnel_paused:
+            _resume_unit(item)
+        traffic_paused = False
+        for profile in active['profiles']:
+            stager.wait_poll(profile['healthUrl'])
+
+        after = profiles_snapshot(home, active['profiles'], state['ingress']['url'])
+        if after != before or ingress.get('pid') != int(unit_state(state['ingress']['unit']).get('MainPID', '0')):
+            raise ControlError('POLICY_MAINTENANCE_OWNER_CHANGED')
+        result = {'status': 'policy-maintenance-cutover', 'revision': candidate['revision'],
+                  'activeGeneration': current['active'], 'previousGeneration': None, 'epoch': current['epoch'],
+                  'routerPidBefore': snapshot['routerPid'], 'routerPid': restarted['routerPid'],
+                  'routerRestarted': restarted['routerPid'] != snapshot['routerPid'],
+                  'ingressPid': ingress['pid'], 'tunnels': after, 'oldBackendsRetained': True,
+                  'finalCanaries': {key: evidence[key] for key in ['writeCanary', 'shellCanary'] if key in evidence}}
+        atomic_json(Path(record['deploymentDirectory']) / 'hot-attempt.json', {'phase': 'active', **result})
+        atomic_json(Path(router['stateDirectory']) / 'last-upgrade.json', result)
+        return result
+    except BaseException as failure:
+        try:
+            if not traffic_paused:
+                # A late fresh-poll/identity failure must close admissions again
+                # before restoring the old routing policy.
+                for item in tunnel_paused:
+                    _pause_unit(item['unit'])
+                _wait_router_idle(state)
+                _pause_unit(ingress_owner['unit'])
+                _wait_router_idle(state)
+                traffic_paused = True
+            if router_mutated:
+                stager.systemctl('stop', router['unit'], check=False)
+                atomic_json(router['configPath'], old_config)
+                atomic_json(registry_path, old_registry)
+                restored = ensure_router(home, state)
+                current = control(router['controlSocket'])
+                publish_selection(home, state, current)
+                state['phase'] = 'active'
+                atomic_json(state_path(home), state)
+                if restored.get('active') != old_registry.get('active') or current.get('active') != old_registry.get('active'):
+                    raise ControlError('POLICY_MAINTENANCE_ROLLBACK_FAILED')
+        finally:
+            if traffic_paused:
+                _resume_unit(ingress_owner)
+                for item in tunnel_paused:
+                    _resume_unit(item)
+        raise failure
+
+
 def activate_candidate(home, release, node, target, active, record, before):
     revision = record['generation']['revision']
     root = state_path(home).parent
@@ -385,12 +557,16 @@ def activate_candidate(home, release, node, target, active, record, before):
         record['mayBePublished'] = True
         state['generations'][record['generation']['id']] = record
         atomic_json(state_path(home), state)
-        register(state, record)
         ingress = ensure_bridge(home, state)
         stager.systemctl('enable', record['generation']['unit'])
         ensure_recovery(home, release)
         if profiles_snapshot(home, active['profiles'], state['ingress']['url']) != before:
             raise ControlError('TUNNEL_CHANGED_DURING_STAGING')
+        snapshot = control(state['router']['controlSocket'])
+        if _selected_generation(snapshot)['policyFingerprint'] != record['generation']['policyFingerprint']:
+            assert_pin_current(home, revision)
+            return policy_maintenance(home, state, active, record, before, ingress)
+        register(state, record)
         snapshot = control(state['router']['controlSocket'])
         assert_pin_current(home, revision)
         try:
