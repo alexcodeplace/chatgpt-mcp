@@ -557,16 +557,21 @@ def activate_candidate(home, release, node, target, active, record, before):
         record['mayBePublished'] = True
         state['generations'][record['generation']['id']] = record
         atomic_json(state_path(home), state)
+        snapshot = control(state['router']['controlSocket'])
+        policy_change = _selected_generation(snapshot)['policyFingerprint'] != record['generation']['policyFingerprint']
+        if not policy_change:
+            # Same-policy publication keeps the original ordering: once
+            # registration is attempted, uncertain bridge adoption retains the
+            # candidate rather than treating it as private staging.
+            register(state, record)
         ingress = ensure_bridge(home, state)
         stager.systemctl('enable', record['generation']['unit'])
         ensure_recovery(home, release)
         if profiles_snapshot(home, active['profiles'], state['ingress']['url']) != before:
             raise ControlError('TUNNEL_CHANGED_DURING_STAGING')
-        snapshot = control(state['router']['controlSocket'])
-        if _selected_generation(snapshot)['policyFingerprint'] != record['generation']['policyFingerprint']:
+        if policy_change:
             assert_pin_current(home, revision)
             return policy_maintenance(home, state, active, record, before, ingress)
-        register(state, record)
         snapshot = control(state['router']['controlSocket'])
         assert_pin_current(home, revision)
         try:
