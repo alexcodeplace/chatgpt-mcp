@@ -24,6 +24,8 @@ HTTP response disconnection cancels only that request's upstream exchange. Legac
 
 A retired backend is stoppable only after it is neither active nor the rollback target, has zero routed in-flight calls, and its authenticated inventory proves no owned resources. Unknown inventory, legacy ownership, outstanding jobs using its artifact, or failed observation retain it. No age-based forced drain. Retirement is explicit and race-checked; capacity pressure is visible, not permission to kill owners.
 
+A capability-policy change remains incompatible with ordinary hot activation. It may cross the routing boundary only through an explicit maintenance cutover after the desired candidate has passed all normal private canaries. The controller pauses the existing tunnel and ingress main processes without replacing their PIDs, proves router in-flight count is zero, stops only the internal router, atomically persists the desired capability configuration plus a registry selecting the candidate, and restarts that router before resuming ingress/tunnels. The cross-policy registry deliberately has no normal previous rollback target; old generations remain retained only for opaque owner follow-ups. A failed maintenance cutover restores the old registry and router capability file before ingress/tunnels resume. Ordinary same-policy hot swaps keep the no-router-restart contract.
+
 ## Continuous legacy adoption
 
 The current tunnel targets a backend directly and has no verified live-target reload. Restarting it after an idle sample has an admission race and does not satisfy this contract. The first installation therefore must not use that old cutover.
