@@ -255,11 +255,18 @@ ExecStart={quote(original['identity']['executable'])} --import {quote(release / 
     return receipt
 
 
-def stage_candidate(home, release, node, active, key_file, canary_directory):
+def desired_config(target):
+    path = Path(target['configPath'])
+    if not path.is_absolute():
+        raise ControlError('TARGET_CONFIG_PATH_INVALID')
+    return read_json(path)
+
+
+def stage_candidate(home, release, node, active, target, key_file, canary_directory):
     revision = verify(release)['revision']
     directory = home / '.local/state/chatgpt-mcp/deployments' / (revision[:12] + '-' + uuid.uuid4().hex[:8])
     directory.mkdir(parents=True, mode=0o700)
-    config = read_json(active['configPath'])
+    config = desired_config(target)
     if config.get('http', {}).get('host', '127.0.0.1') != '127.0.0.1':
         raise ControlError('HOT_SWAP_REQUIRES_LOOPBACK_BACKEND')
     config.setdefault('http', {})['port'] = stager.free_port()
@@ -346,7 +353,7 @@ def deploy(home, release, target):
     if previous_state:
         ensure_router(home, previous_state)
     before = profiles_snapshot(home, active['profiles'], previous_state['ingress']['url'] if previous_state else active['backendUrl'])
-    record = stage_candidate(home, release, node, active, key_file, Path(target['canaryDirectory']))
+    record = stage_candidate(home, release, node, active, target, key_file, Path(target['canaryDirectory']))
     try:
         return activate_candidate(home, release, node, target, active, record, before)
     except BaseException:

@@ -153,6 +153,17 @@ class LiveProofMetadataTests(unittest.TestCase):
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_candidate_uses_enrollment_target_config_not_stale_active_config(self):
+        with fixture() as f:
+            desired = f.home / 'desired-config.json'
+            hot.atomic_json(desired, {'http': {'port': 39999}, 'filesystem': {'read': True, 'write': True, 'roots': [str(f.home)],
+                'blocklist': [{'path': str(f.home / 'secret.token'), 'mode': 'deny-read'}]}, 'keyManager': {'enabled': True}})
+            f.target['configPath'] = str(desired)
+            loaded = deploy.desired_config(f.target)
+            self.assertTrue(loaded['keyManager']['enabled'])
+            self.assertEqual(loaded['filesystem']['blocklist'][0]['mode'], 'deny-read')
+            self.assertNotIn('keyManager', hot.read_json(f.active['configPath']))
+
     def test_activation_changes_selection_not_tunnels_or_old_units(self):
         with fixture() as f, deployment_seams(f) as calls:
             old_config = Path(f.a['settings']['configPath']).read_bytes()
