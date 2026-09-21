@@ -153,6 +153,11 @@ class LiveProofMetadataTests(unittest.TestCase):
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_generation_descriptor_preserves_rebound_instance(self):
+        item = {'id': 'a' * 32, 'instanceId': 'b' * 32, 'url': 'http://127.0.0.1:31001',
+                'revision': 'c' * 40, 'unit': 'backend-a.service', 'policyFingerprint': 'd' * 64}
+        self.assertEqual(deploy._generation_descriptor(item)['instanceId'], item['instanceId'])
+
     def test_candidate_uses_enrollment_target_config_not_stale_active_config(self):
         with fixture() as f:
             desired = f.home / 'desired-config.json'
@@ -351,6 +356,119 @@ class RecoveryTests(unittest.TestCase):
                 result = recovery.tick(settings)
                 self.assertEqual(result['components'][0]['action'], 'route_recovery')
                 repair.assert_called_once_with(settings)
+
+    def test_reboot_rebind_requires_changed_boot_identity(self):
+        with fixture() as f:
+            f.state['generations'] = {f.b['generation']['id']: f.b}
+            status = {'epoch': 7, 'active': f.b['generation']['id'], 'previous': None, 'routerPid': 81001,
+                      'generations': [copy.deepcopy(f.b['generation'])]}
+            hot.atomic_json(f.root / 'selection-observation.json',
+                            {'epoch': 6, 'active': f.b['generation']['id'], 'previous': None,
+                             'revision': f.b['generation']['revision'], 'routerPid': 80001,
+                             'bootId': '11111111-1111-1111-1111-111111111111'})
+            with mock.patch.object(hot, 'current_boot_id', return_value='11111111-1111-1111-1111-111111111111'), \
+                 mock.patch.object(hot, 'backend', side_effect=AssertionError('same-boot backend must not be adopted')):
+                self.assertIsNone(hot.rebind_generation_after_reboot(f.home, f.state, status, status['active']))
+
+    def test_reboot_rebind_missing_observation_fails_closed(self):
+        with fixture() as f:
+            status = {'epoch': 7, 'active': f.b['generation']['id'], 'previous': None, 'routerPid': 81001}
+            with mock.patch.object(hot, 'current_boot_id', return_value='22222222-2222-2222-2222-222222222222'):
+                self.assertFalse(hot.reboot_rebind_allowed(f.state, status))
+
+    def test_reboot_rebind_adopts_exact_idle_systemd_backend_without_changing_generation(self):
+        with fixture() as f:
+            generation = copy.deepcopy(f.b['generation'])
+            stable = generation['id']
+            live = 'c' * 32
+            f.state['generations'] = {stable: {**f.b, 'generation': generation}}
+            status = {'epoch': 7, 'active': stable, 'previous': None, 'routerPid': 81001,
+                      'generations': [copy.deepcopy(generation)]}
+            hot.atomic_json(f.root / 'selection-observation.json',
+                            {'epoch': 6, 'active': stable, 'previous': None,
+                             'revision': generation['revision'], 'routerPid': 80001,
+                             'bootId': '11111111-1111-1111-1111-111111111111'})
+            observation = {
+                'instanceId': live,
+                'routingAbi': 1,
+                'jobsAbi': 1,
+                'policyFingerprint': generation['policyFingerprint'],
+                'runtime': {'release': generation['revision'], 'pid': 81234},
+                'resources': {'applications': 0, 'recordings': 0},
+                'exchanges': 0,
+                'activeCalls': 0,
+                'queuedCalls': 0,
+                'fenced': False,
+            }
+            calls = []
+            def control(socket_path, path='/status', data=None):
+                calls.append((path, copy.deepcopy(data)))
+                if path == '/rebind':
+                    self.assertEqual(data, {'expectedEpoch': 7, 'id': stable, 'instanceId': live})
+                    return {'epoch': 8}
+                if path == '/status':
+                    return {**status, 'epoch': 8,
+                            'generations': [{**generation, 'instanceId': live}]}
+                raise AssertionError(path)
+            with mock.patch.object(hot, 'current_boot_id', return_value='22222222-2222-2222-2222-222222222222'), \
+                 mock.patch.object(hot, 'backend', return_value=observation), \
+                 mock.patch.object(hot, 'unit_main_pid', return_value=81234), \
+                 mock.patch.object(hot, 'control', side_effect=control), \
+                 mock.patch.object(hot, 'publish_selection', return_value={'revision': generation['revision']}) as publish:
+                result = hot.rebind_generation_after_reboot(f.home, f.state, status, stable)
+            self.assertEqual(result['action'], 'generation_rebind')
+            self.assertEqual(result['generation'], stable)
+            self.assertEqual(result['instanceId'], live)
+            self.assertIn(('/rebind', {'expectedEpoch': 7, 'id': stable, 'instanceId': live}), calls)
+            publish.assert_called_once()
+
+    def test_reboot_rebind_refuses_live_owned_resources(self):
+        generation = {'id': 'a' * 32, 'unit': 'backend-a.service', 'revision': 'b' * 40,
+                      'policyFingerprint': 'c' * 64}
+        observation = {
+            'instanceId': 'd' * 32,
+            'policyFingerprint': generation['policyFingerprint'],
+            'runtime': {'release': generation['revision'], 'pid': 81234},
+            'resources': {'applications': 1, 'recordings': 0},
+            'exchanges': 0, 'activeCalls': 0, 'queuedCalls': 0, 'fenced': False,
+        }
+        with mock.patch.object(hot, 'unit_main_pid', side_effect=AssertionError('owned backend must fail before unit adoption')):
+            with self.assertRaisesRegex(hot.ControlError, 'REBIND_REQUIRES_IDLE_BACKEND'):
+                hot.rebindable_backend(generation, observation)
+
+    def test_reboot_rebind_refuses_wrong_systemd_main_pid(self):
+        generation = {'id': 'a' * 32, 'unit': 'backend-a.service', 'revision': 'b' * 40,
+                      'policyFingerprint': 'c' * 64}
+        observation = {
+            'instanceId': 'd' * 32,
+            'policyFingerprint': generation['policyFingerprint'],
+            'runtime': {'release': generation['revision'], 'pid': 81234},
+            'resources': {'applications': 0, 'recordings': 0},
+            'exchanges': 0, 'activeCalls': 0, 'queuedCalls': 0, 'fenced': False,
+        }
+        with mock.patch.object(hot, 'unit_main_pid', return_value=99999):
+            with self.assertRaisesRegex(hot.ControlError, 'GENERATION_UNIT_IDENTITY_MISMATCH'):
+                hot.rebindable_backend(generation, observation)
+
+    def test_active_rebind_failure_still_allows_previous_generation_rollback(self):
+        with fixture() as f:
+            settings = {'hotSwap': {'statePath': str(hot.state_path(f.home))}}
+            status = {'epoch': 7, 'active': f.b['generation']['id'], 'previous': f.a['generation']['id'],
+                      'routerPid': 81001, 'generations': []}
+            with mock.patch.object(hot, 'control', return_value=status), \
+                 mock.patch.object(hot, 'rebind_generation_after_reboot',
+                                   side_effect=[hot.ControlError('ACTIVE_REBIND_FAILED'), None]) as rebind, \
+                 mock.patch.object(hot, 'select',
+                                   return_value={'state': 'selected', 'revision': f.a['generation']['revision'],
+                                                 'activeGeneration': f.a['generation']['id'],
+                                                 'previousGeneration': f.b['generation']['id'],
+                                                 'epoch': 8, 'routerPid': 81001}) as rollback, \
+                 mock.patch.object(hot.subprocess, 'run', side_effect=AssertionError('rollback must win')):
+                result = hot.recover_backend(settings)
+            self.assertEqual(result['action'], 'route_rollback')
+            self.assertTrue(result['accepted'])
+            self.assertEqual(rebind.call_count, 2)
+            rollback.assert_called_once_with(f.home)
 
     def test_recovery_retains_normal_overdeck_ownership_when_no_rollback_is_available(self):
         with fixture() as f:
