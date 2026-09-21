@@ -107,6 +107,10 @@ test('host display guard preserves ordinary shell, Python, Node, and ffmpeg work
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('python3', ['-c', 'print(1 + 1)'], false));
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('node', ['-e', 'console.log(2)'], false));
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', 'printf ok'], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', "python3 - <<'PY'\nimport json\nfrom pathlib import Path\nprint(json.dumps({'path': str(Path('.'))}))\nPY"], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', "printf '%s\n' 'documentation says import json'"], false));
+  assert.throws(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', 'import /tmp/shot.png'], false), isCommandNotAllowed);
+  assert.throws(() => authorizeHostDisplaySafeInvocation('env', ['import', '-window', 'root', '/tmp/shot.png'], false), isCommandNotAllowed);
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('ffmpeg', ['-i', 'input.mp4', '-c:v', 'copy', 'output.mp4'], false));
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('grim', [], true));
 });

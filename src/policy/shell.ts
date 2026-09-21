@@ -88,7 +88,8 @@ const HIGH_SIGNAL_HOST_CAPTURE_PATTERNS: readonly RegExp[] = [
   /\/tmp\/\.X11-unix\/X\d+\b/i,
 ];
 
-const WRAPPED_CAPTURE_COMMAND = /(?:^|[\s;&|()])(?:deepin-screenshot|flameshot|gnome-screenshot|gnome-shell-screenshot|grim|grimshot|import|ksnip|maim|mate-screenshot|scrot|shutter|spectacle|wf-recorder|wl-screenrec|xwd|xfce4-screenshooter)(?=$|[\s;&|()])/i;
+const WRAPPED_CAPTURE_COMMAND = /(?:^|[\s;&|()])(?:deepin-screenshot|flameshot|gnome-screenshot|gnome-shell-screenshot|grim|grimshot|ksnip|maim|mate-screenshot|scrot|shutter|spectacle|wf-recorder|wl-screenrec|xwd|xfce4-screenshooter)(?=$|[\s;&|()])/i;
+const WRAPPED_IMAGEMAGICK_IMPORT = /(?:^|[\s;&|()])import(?=\s+(?:(?:-(?:window|screen|frame|silent|snaps|monitor|pause|quality|resize|crop|display|density)\b)|[^;\n|()]*\.(?:png|jpe?g|gif|webp|bmp|tiff?)\b))/i;
 
 export interface ShellLimits {
   enabled: boolean;
@@ -244,7 +245,7 @@ export function authorizeHostDisplaySafeInvocation(
     );
   }
 
-  if (SHELL_OR_WRAPPER_EXECUTABLES.has(executable) && WRAPPED_CAPTURE_COMMAND.test(payload)) {
+  if (SHELL_OR_WRAPPER_EXECUTABLES.has(executable) && (WRAPPED_CAPTURE_COMMAND.test(payload) || WRAPPED_IMAGEMAGICK_IMPORT.test(payload))) {
     throw adapterError(
       'COMMAND_NOT_ALLOWED',
       'shell.exec',
