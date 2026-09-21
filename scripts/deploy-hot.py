@@ -406,6 +406,8 @@ def _resume_unit(item):
 
 def _generation_descriptor(item):
     result = {key: copy.deepcopy(item[key]) for key in ['id', 'url', 'revision', 'unit', 'policyFingerprint']}
+    if 'instanceId' in item:
+        result['instanceId'] = copy.deepcopy(item['instanceId'])
     if 'legacy' in item:
         result['legacy'] = copy.deepcopy(item['legacy'])
     return result

@@ -15,6 +15,7 @@ const idSchema = z.string().regex(/^[a-f0-9]{32}$/);
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const generationSchema = z.object({
   id: idSchema,
+  instanceId: idSchema.optional(),
   url: z.string().max(100).refine(value => { try { loopbackUrl(value); return true; } catch { return false; } }),
   revision: z.string().regex(/^(?:[a-f0-9]{40}|development)$/),
   unit: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.@:-]*\.service$/),
@@ -50,6 +51,10 @@ function parsed<T>(schema: z.ZodType<T>, value: unknown): T {
   if (!result.success) throw new RouteError('INVALID_CONTROL_INPUT', 400);
   return result.data;
 }
+function backendInstance(item: Generation): string {
+  return item.instanceId ?? item.id;
+}
+
 function cancellationKey(req: IncomingMessage, id: unknown): string | undefined {
   if (typeof id !== 'string' && typeof id !== 'number') return undefined;
   if (typeof req.headers['mcp-session-id'] !== 'string' || !req.headers['mcp-session-id']) return undefined;
@@ -71,7 +76,7 @@ async function upstreamJson(generation: Generation, path: string, key: string, t
     const upstream = request(new URL(path, generation.url), {
       method: data ? 'POST' : 'GET', agent: false,
       headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json',
-        'x-mcp-route-key': key, 'x-mcp-route-instance': generation.id,
+        'x-mcp-route-key': key, 'x-mcp-route-instance': backendInstance(generation),
         ...(token ? { authorization: `Bearer ${token}` } : {}), ...(data ? { 'content-length': data.length } : {}) },
     }, response => {
       void readBytes(response, 1024 * 1024).then(bytes => {
@@ -138,7 +143,7 @@ export async function startRouter(options: RouterOptions): Promise<RunningRouter
       return { runtime, resources: null, legacy: true };
     }
     const result = await upstreamJson(item, '/__hotswap', options.key, options.config.http.token);
-    if (result.instanceId !== item.id || result.routingAbi !== routingAbi || result.jobsAbi !== jobsAbi
+    if (result.instanceId !== backendInstance(item) || result.routingAbi !== routingAbi || result.jobsAbi !== jobsAbi
       || result.policyFingerprint !== expectedPolicy || result.fenced !== false
       || object(result.runtime).release !== item.revision) throw new RouteError('BACKEND_IDENTITY_OR_ABI_MISMATCH');
     return result;
@@ -169,6 +174,26 @@ export async function startRouter(options: RouterOptions): Promise<RunningRouter
             await commit({ ...state, epoch: state.epoch + 1, generations: [...state.generations, item],
               legacyOwner: item.legacy ? item.id : state.legacyOwner });
           }
+        } else if (req.url === '/rebind') {
+          cas(input.expectedEpoch);
+          const id = parsed(idSchema, input.id);
+          const instanceId = parsed(idSchema, input.instanceId);
+          const item = generation(id);
+          if (item.legacy) throw new RouteError('LEGACY_REBIND_REFUSED');
+          if ((inFlight.get(item.id) ?? 0) !== 0) throw new RouteError('GENERATION_HAS_OWNERS');
+          if (instanceId === backendInstance(item)) { json(res, 200, snapshot()); return; }
+          const rebound = { ...item, instanceId };
+          const observed = await probe(rebound);
+          const resources = observed.resources == null ? null : object(observed.resources);
+          if (!resources || resources.applications !== 0 || resources.recordings !== 0
+            || observed.exchanges !== 0 || observed.activeCalls !== 0 || observed.queuedCalls !== 0) {
+            throw new RouteError('REBIND_REQUIRES_IDLE_BACKEND');
+          }
+          await commit({
+            ...state,
+            epoch: state.epoch + 1,
+            generations: state.generations.map(g => g.id === id ? rebound : g),
+          });
         } else if (req.url === '/activate' || req.url === '/rollback') {
           cas(input.expectedEpoch);
           const selected = req.url === '/rollback' ? state.previous : parsed(idSchema, input.id);
@@ -189,7 +214,7 @@ export async function startRouter(options: RouterOptions): Promise<RunningRouter
             // The backend atomically fences new admissions only after its actual
             // operations and adapter-owned resources are empty. No idle timer.
             const result = await upstreamJson(item, '/__hotswap/retire', options.key, options.config.http.token, {});
-            if (result.instanceId !== item.id || result.fenced !== true) throw new RouteError('RETIREMENT_NOT_CONFIRMED');
+            if (result.instanceId !== backendInstance(item) || result.fenced !== true) throw new RouteError('RETIREMENT_NOT_CONFIRMED');
             if ((inFlight.get(item.id) ?? 0) !== 0) throw new RouteError('GENERATION_HAS_OWNERS');
             await commit({ ...state, epoch: state.epoch + 1, generations: state.generations.filter(g => g.id !== item.id) });
           } finally { retiring.delete(item.id); }

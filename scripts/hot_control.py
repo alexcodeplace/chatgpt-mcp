@@ -9,6 +9,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import stat
@@ -118,7 +119,113 @@ def backend(generation, key_file, path='/__hotswap', data=None):
         raise ControlError('LOOPBACK_BACKEND_REQUIRED')
     key = private_file(key_file).read_text().strip()
     return exchange(http.client.HTTPConnection('127.0.0.1', url.port, timeout=5), path, data,
-                    {'x-mcp-route-key': key, 'x-mcp-route-instance': generation['id']})
+                    {'x-mcp-route-key': key,
+                     'x-mcp-route-instance': generation.get('instanceId', generation['id'])})
+
+def current_boot_id():
+    value = Path('/proc/sys/kernel/random/boot_id').read_text().strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', value):
+        raise ControlError('INVALID_BOOT_ID')
+    return value
+
+
+def unit_main_pid(unit):
+    result = subprocess.run(
+        ['systemctl', '--user', 'show', unit, '-p', 'ActiveState', '-p', 'MainPID'],
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    if result.returncode != 0:
+        raise ControlError('GENERATION_UNIT_UNAVAILABLE')
+    values = {}
+    for line in result.stdout.splitlines():
+        key, sep, value = line.partition('=')
+        if sep:
+            values[key] = value
+    if values.get('ActiveState') != 'active':
+        raise ControlError('GENERATION_UNIT_UNAVAILABLE')
+    try:
+        pid = int(values.get('MainPID', '0'))
+    except ValueError:
+        pid = 0
+    if pid <= 0:
+        raise ControlError('GENERATION_UNIT_UNAVAILABLE')
+    return pid
+
+
+def rebindable_backend(generation, observation):
+    instance = observation.get('instanceId')
+    if not isinstance(instance, str) or not re.fullmatch(r'[a-f0-9]{32}', instance):
+        raise ControlError('BACKEND_INSTANCE_INVALID')
+    if instance == generation.get('instanceId', generation['id']):
+        return None
+    runtime = observation.get('runtime')
+    resources = observation.get('resources')
+    if not isinstance(runtime, dict) or not isinstance(resources, dict):
+        raise ControlError('REBIND_REQUIRES_IDLE_BACKEND')
+    if runtime.get('release') != generation['revision'] or observation.get('policyFingerprint') != generation['policyFingerprint']:
+        raise ControlError('BACKEND_REVISION_OR_POLICY_MISMATCH')
+    if observation.get('fenced') is not False:
+        raise ControlError('REBIND_REQUIRES_IDLE_BACKEND')
+    for key in ('applications', 'recordings'):
+        if resources.get(key) != 0:
+            raise ControlError('REBIND_REQUIRES_IDLE_BACKEND')
+    for key in ('exchanges', 'activeCalls', 'queuedCalls'):
+        if observation.get(key) != 0:
+            raise ControlError('REBIND_REQUIRES_IDLE_BACKEND')
+    pid = runtime.get('pid')
+    if not isinstance(pid, int) or pid <= 0 or unit_main_pid(generation['unit']) != pid:
+        raise ControlError('GENERATION_UNIT_IDENTITY_MISMATCH')
+    return instance
+
+
+def reboot_rebind_allowed(state, status):
+    observation_path = Path(state['router']['stateDirectory']) / 'selection-observation.json'
+    try:
+        previous = read_json(observation_path)
+    except (OSError, ValueError, ControlError):
+        previous = {}
+    boot = current_boot_id()
+    recorded = previous.get('bootId')
+    if isinstance(recorded, str):
+        return recorded != boot
+    # Compatibility for deployments created before boot identity was persisted:
+    # require an existing prior router PID and evidence that the router process
+    # itself changed. Missing/corrupt observations never authorize adoption.
+    prior_pid = previous.get('routerPid')
+    return isinstance(prior_pid, int) and prior_pid > 0 and prior_pid != status.get('routerPid')
+
+
+def rebind_generation_after_reboot(home, state, status, generation_id):
+    if not reboot_rebind_allowed(state, status):
+        return None
+    record = state['generations'].get(generation_id)
+    if not record:
+        raise ControlError('GENERATION_METADATA_MISSING')
+    generation = record['generation']
+    if generation.get('legacy'):
+        return None
+    observation = backend(generation, state['router']['keyFile'])
+    instance = rebindable_backend(generation, observation)
+    if instance is None:
+        return None
+    rebound = control(state['router']['controlSocket'], '/rebind', {
+        'expectedEpoch': status['epoch'],
+        'id': generation['id'],
+        'instanceId': instance,
+    })
+    current = control(state['router']['controlSocket'])
+    active = publish_selection(home, state, current)
+    return {
+        'action': 'generation_rebind',
+        'accepted': True,
+        'generation': generation['id'],
+        'instanceId': instance,
+        'revision': active['revision'],
+        'epoch': current['epoch'],
+        'routerPid': current['routerPid'],
+        'reboundEpoch': rebound['epoch'],
+    }
+
 
 
 def state_path(home):
@@ -169,7 +276,8 @@ def publish_selection(home, state, status):
     atomic_json(home / '.config/chatgpt-mcp/recovery.json', recovery)
     atomic_json(Path(state['router']['stateDirectory']) / 'selection-observation.json',
                 {'epoch': status['epoch'], 'active': generation['id'], 'previous': status.get('previous'),
-                 'revision': generation['revision'], 'routerPid': status['routerPid']})
+                 'revision': generation['revision'], 'routerPid': status['routerPid'],
+                 'bootId': current_boot_id()})
     return active
 
 
@@ -201,13 +309,37 @@ def recover_backend(settings):
     home = Path(state['home'])
     try:
         current = control(state['router']['controlSocket'])
-        if current.get('previous'):
+    except (ControlError, OSError, KeyError, ValueError):
+        current = None
+
+    if current:
+        active = current.get('active')
+        if active:
+            try:
+                rebound = rebind_generation_after_reboot(home, state, current, active)
+                if rebound:
+                    return rebound
+            except (ControlError, OSError, KeyError, ValueError, subprocess.SubprocessError):
+                pass
+        try:
+            current = control(state['router']['controlSocket'])
+        except (ControlError, OSError, KeyError, ValueError):
+            current = None
+
+    if current and current.get('previous'):
+        previous = current['previous']
+        try:
+            rebind_generation_after_reboot(home, state, current, previous)
+        except (ControlError, OSError, KeyError, ValueError, subprocess.SubprocessError):
+            pass
+        try:
             result = select(home)
             return {'action': 'route_rollback', 'accepted': True, **result}
-    except (ControlError, OSError, KeyError, ValueError):
-        pass
+        except (ControlError, OSError, KeyError, ValueError, subprocess.SubprocessError):
+            pass
+
     # Normal Overdeck reconciliation stages a replacement; it never restarts a
-    # live backend to repair a failed generation. No duplicate controller loop.
+    # live backend to repair a failed same-boot generation. No duplicate loop.
     result = subprocess.run(['systemctl', '--user', 'start', '--no-block', 'overdeck-mcp-sync.service'],
                             capture_output=True, timeout=5, check=False)
     return {'action': 'overdeck_reconciliation', 'accepted': result.returncode == 0}
