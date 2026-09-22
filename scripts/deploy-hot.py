@@ -85,6 +85,64 @@ def wait_control(router, timeout=35):
     raise ControlError('ROUTER_DID_NOT_START')
 
 
+def _route_identity(status):
+    return {
+        'schema': status.get('schema'),
+        'epoch': status.get('epoch'),
+        'active': status.get('active'),
+        'previous': status.get('previous'),
+        'legacyOwner': status.get('legacyOwner'),
+        'generations': [_generation_descriptor(item) for item in status.get('generations', [])],
+    }
+
+
+def _router_command(pid):
+    return Path('/proc', str(pid), 'cmdline').read_bytes().split(b'\0')
+
+
+def _deleted_expected_executable(pid, expected):
+    try:
+        raw = os.readlink(Path('/proc', str(pid), 'exe'))
+    except OSError:
+        return False
+    return raw == str(Path(expected).resolve()) + ' (deleted)'
+
+
+def _reconcile_deleted_router_executable(home, state, snapshot):
+    router = state['router']
+    pid = snapshot.get('routerPid')
+    if not isinstance(pid, int) or pid <= 0 or not _deleted_expected_executable(pid, router['node']):
+        raise ControlError('ROUTER_PROCESS_PROVENANCE_MISMATCH')
+    command = _router_command(pid)
+    entry = str(Path(router['releaseDirectory']) / 'dist/src/hotswap/main.js').encode()
+    if entry not in command:
+        raise ControlError('ROUTER_PROCESS_PROVENANCE_MISMATCH')
+
+    expected = _route_identity(snapshot)
+    tunnel_owners = []
+    ingress_owner = None
+    try:
+        for profile in state.get('profiles', []):
+            tunnel_owners.append(_pause_unit(profile['unit']))
+        drained = _wait_router_idle(state)
+        if _route_identity(drained) != expected:
+            raise ControlError('ROUTER_RECONCILE_ROUTE_CHANGED')
+        ingress_owner = _pause_unit(state['ingress']['unit'])
+        drained = _wait_router_idle(state)
+        if _route_identity(drained) != expected:
+            raise ControlError('ROUTER_RECONCILE_ROUTE_CHANGED')
+        stager.systemctl('restart', router['unit'])
+        current = wait_control(router)
+        if _route_identity(current) != expected:
+            raise ControlError('ROUTER_RECONCILE_ROUTE_CHANGED')
+        return current
+    finally:
+        if ingress_owner is not None:
+            _resume_unit(ingress_owner)
+        for item in tunnel_owners:
+            _resume_unit(item)
+
+
 def ensure_router(home, state):
     router = state['router']
     unit = home / '.config/systemd/user' / router['unit']
@@ -128,10 +186,22 @@ WantedBy=default.target
         stager.systemctl('enable', '--now', router['unit'])
     result = wait_control(router)
     current = unit_state(router['unit'])
-    identity = executable_identity(result['routerPid'])
-    command = Path('/proc', str(result['routerPid']), 'cmdline').read_bytes().split(b'\0')
-    if current.get('MainPID') != str(result['routerPid']) or identity['executable'] != str(Path(router['node']).resolve()) or str(release / 'dist/src/hotswap/main.js').encode() not in command:
+    command = _router_command(result['routerPid'])
+    expected_node = str(Path(router['node']).resolve())
+    entry = str(release / 'dist/src/hotswap/main.js').encode()
+    if current.get('MainPID') != str(result['routerPid']) or entry not in command:
         raise ControlError('ROUTER_PROCESS_PROVENANCE_MISMATCH')
+    try:
+        identity = executable_identity(result['routerPid'])
+    except FileNotFoundError:
+        identity = None
+    if identity is None or identity['executable'] != expected_node:
+        result = _reconcile_deleted_router_executable(home, state, result)
+        current = unit_state(router['unit'])
+        command = _router_command(result['routerPid'])
+        identity = executable_identity(result['routerPid'])
+        if current.get('MainPID') != str(result['routerPid']) or identity['executable'] != expected_node or entry not in command:
+            raise ControlError('ROUTER_PROCESS_PROVENANCE_MISMATCH')
     return result
 
 
@@ -662,9 +732,30 @@ def activate_candidate(home, release, node, target, active, record, before):
         return result
 
 
+def reconcile_router(home):
+    path = state_path(home)
+    if not path.exists():
+        return {'status': 'not-configured'}
+    lock_path = home / '.local/state/chatgpt-mcp/recovery/recovery.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with lock_path.open('a+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load_state(home)
+        before = control(state['router']['controlSocket'])
+        before_pid = before['routerPid']
+        current = ensure_router(home, state)
+        return {
+            'status': 'reconciled',
+            'routerPid': current['routerPid'],
+            'routerRestarted': current['routerPid'] != before_pid,
+            'activeGeneration': current.get('active'),
+            'epoch': current.get('epoch'),
+        }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['deploy', 'status', 'rollback', 'activate', 'policy-rollback'])
+    parser.add_argument('action', choices=['deploy', 'status', 'rollback', 'activate', 'policy-rollback', 'reconcile-router'])
     parser.add_argument('--release', type=Path)
     parser.add_argument('--target', type=Path)
     parser.add_argument('--generation')
@@ -673,6 +764,8 @@ def main():
     home = Path.home()
     if args.action == 'status':
         result = status(home)
+    elif args.action == 'reconcile-router':
+        result = reconcile_router(home)
     elif args.action == 'policy-rollback':
         if not args.plan:
             parser.error('policy-rollback requires --plan')
