@@ -74,6 +74,12 @@ test('filesystem blocklist normalizes paths and defaults to freeze-children mode
   assert.equal(config.filesystem.blocklist[0]?.message, 'Use the project .worktrees directory.');
 });
 
+test('filesystem blocklist accepts explicit deny-read mode', () => {
+  const config = parseConfig({ filesystem: { blocklist: [{ path: '/tmp/private-file', mode: 'deny-read', message: 'Use the named-key broker.' }] } });
+  assert.equal(config.filesystem.blocklist[0]?.mode, 'deny-read');
+  assert.equal(config.filesystem.blocklist[0]?.path, '/tmp/private-file');
+});
+
 test('environment overrides file transport settings', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'chatgpt-mcp-config-'));
   try {
@@ -150,6 +156,26 @@ test('Kubernetes execution is strictly opt-in and local-only by default', () => 
   assert.equal(config.execution.kubernetes.client.command, 'kubectl');
   assert.equal(config.execution.kubernetes.remoteCommands.length, 0);
   assert.equal(config.execution.kubernetes.localOnlyCommands.length, 0);
+});
+
+test('command policies validate ordered regex rules and custom denial messages', () => {
+  const config = parseConfig({
+    execution: {
+      commandPolicies: [
+        { id: 'allow-unit', match: { invocation: 'test:unit' }, action: { type: 'allow' } },
+        { id: 'remote-tests', match: { command: 'pnpm$', cwd: '/repo' }, action: { type: 'route', backend: 'kubernetes' } },
+        { id: 'deny-watch', match: { invocation: '--watch' }, action: { type: 'deny', message: 'Use a remote runner.' } },
+      ],
+    },
+  });
+  assert.equal(config.execution.commandPolicies.length, 3);
+  assert.equal(config.execution.commandPolicies[2]?.action.type, 'deny');
+  assert.throws(() => parseConfig({ execution: { commandPolicies: [{ id: 'bad-regex', match: { invocation: '[bad' }, action: { type: 'allow' } }] } }), /valid regular expression/);
+  assert.throws(() => parseConfig({ execution: { commandPolicies: [{ id: 'empty-match', match: {}, action: { type: 'allow' } }] } }), /at least one match field is required/);
+  assert.throws(() => parseConfig({ execution: { commandPolicies: [
+    { id: 'duplicate', match: { command: 'node' }, action: { type: 'allow' } },
+    { id: 'duplicate', match: { command: 'pnpm' }, action: { type: 'allow' } },
+  ] } }), /policy ids must be unique/);
 });
 
 test('Kubernetes execution requires an image only when explicitly enabled', () => {
@@ -263,4 +289,26 @@ test('local systemd isolation is explicitly opt-in and resource bounded', () => 
   assert.equal(config.execution.localIsolation.stopTimeoutMs, 5000);
   assert.throws(() => parseConfig({ execution: { localIsolation: { tasksMax: 1 } } }));
   assert.throws(() => parseConfig({ execution: { localIsolation: { cpuWeight: 0 } } }));
+});
+
+
+test('legacy outputRedaction config is ignored and absent from parsed runtime config', () => {
+  const config = parseConfig({ outputRedaction: { files: ['/tmp/secret'], directories: ['/tmp/private'] } });
+  assert.equal('outputRedaction' in config, false);
+});
+
+test('key manager is disabled by default and exposes no token value in configuration', () => {
+  const config = parseConfig({});
+  assert.equal(config.keyManager.enabled, false);
+  assert.equal(config.keyManager.url, 'http://127.0.0.1:4987');
+  assert.equal(config.keyManager.tokenFile, undefined);
+  assert.equal(config.keyManager.timeoutMs, 10_000);
+});
+
+test('key manager enablement requires a token file and normalizes only its path', () => {
+  assert.throws(() => parseConfig({ keyManager: { enabled: true } }), /tokenFile is required/);
+  const config = parseConfig({ keyManager: { enabled: true, tokenFile: './kmgr-agent-token' } });
+  assert.equal(config.keyManager.enabled, true);
+  assert.equal(config.keyManager.tokenFile?.endsWith('/kmgr-agent-token'), true);
+  assert.equal('token' in config.keyManager, false);
 });

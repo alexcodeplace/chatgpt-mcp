@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   authorizePath,
+  authorizePathRead,
   authorizePathEntryCreation,
   authorizePathEntryMutation,
   authorizeShellFilesystemMutation,
+  authorizeShellFilesystemRead,
 } from '../src/policy/filesystem.js';
 
 async function fixture(): Promise<{ base: string; root: string; outside: string }> {
@@ -182,6 +184,94 @@ test('direct shell mutation guard blocks protected mkdir/rmdir/rm without affect
       (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
     );
     await authorizeShellFilesystemMutation('node', ['-e', 'process.exit(0)'], existing, rules);
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+
+test('direct shell read guard blocks protected explicit paths, relative aliases, and dd input while leaving ordinary files alone', async () => {
+  const f = await fixture();
+  const protectedDir = join(f.root, 'protected');
+  const protectedFile = join(protectedDir, 'token.txt');
+  const ordinary = join(f.root, 'ordinary.txt');
+  const alias = join(f.root, 'alias.txt');
+  const rules = [{ path: protectedDir, mode: 'deny-read' as const, message: 'use named-key tools' }];
+  try {
+    await mkdir(protectedDir);
+    await writeFile(protectedFile, 'synthetic');
+    await writeFile(ordinary, 'ok');
+    await symlink(protectedFile, alias);
+    for (const [command, args, cwd] of [
+      ['cat', [protectedFile], f.root],
+      ['head', ['-n', '1', '../protected/token.txt'], join(f.root, 'child')],
+      ['base64', [alias], f.root],
+      ['cp', [protectedFile, join(f.root, 'copy')], f.root],
+      ['dd', [`if=${protectedFile}`, 'of=/dev/null'], f.root],
+    ] as const) {
+      if (cwd.endsWith('/child')) await mkdir(cwd);
+      await assert.rejects(
+        () => authorizeShellFilesystemRead(command, args, cwd, rules),
+        (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED'
+          && (error as { message?: string }).message === 'use named-key tools',
+      );
+    }
+    for (const [command, args] of [
+      ['systemd-run', ['--user', '--wait', '--pipe', '--unit=proof', '/usr/bin/cat', protectedFile]],
+      ['systemd-run', ['--user', '--unit', 'proof', 'env', 'TOKEN_SCOPE=test', 'nohup', '/usr/bin/cat', protectedFile]],
+      ['env', ['TOKEN_SCOPE=test', 'cat', protectedFile]],
+      ['nohup', ['--', 'cat', protectedFile]],
+    ] as const) {
+      await assert.rejects(
+        () => authorizeShellFilesystemRead(command, args, f.root, rules),
+        (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED'
+          && (error as { message?: string }).message === 'use named-key tools',
+      );
+    }
+    await authorizeShellFilesystemRead('systemd-run', ['--user', '/usr/bin/cat', ordinary], f.root, rules);
+    await authorizeShellFilesystemRead('cat', [ordinary], f.root, rules);
+    await authorizeShellFilesystemRead('node', ['-e', 'process.exit(0)'], f.root, rules);
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+test('deny-read blocks an exact file and directory descendants with the configured message', async () => {
+  const f = await fixture();
+  const protectedDir = join(f.root, 'protected');
+  const protectedFile = join(protectedDir, 'token.txt');
+  const sibling = join(f.root, 'ordinary.txt');
+  try {
+    await mkdir(protectedDir);
+    await writeFile(protectedFile, 'synthetic');
+    await writeFile(sibling, 'ok');
+    const message = 'Use the brokered named-key tools for this path.';
+    await assert.rejects(
+      () => authorizePathRead(protectedFile, [f.root], [{ path: protectedFile, mode: 'deny-read', message }]),
+      (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED' && (error as { message?: string }).message === message,
+    );
+    await assert.rejects(
+      () => authorizePathRead(protectedFile, [f.root], [{ path: protectedDir, mode: 'deny-read' }]),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    assert.equal(await authorizePathRead(sibling, [f.root], [{ path: protectedDir, mode: 'deny-read' }]), sibling);
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+test('deny-read follows aliases to a protected file while freeze-children remains read-neutral', async () => {
+  const f = await fixture();
+  const protectedFile = join(f.root, 'protected.txt');
+  const alias = join(f.root, 'alias.txt');
+  try {
+    await writeFile(protectedFile, 'synthetic');
+    await symlink(protectedFile, alias);
+    await assert.rejects(
+      () => authorizePathRead(alias, [f.root], [{ path: protectedFile, mode: 'deny-read' }]),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    assert.equal(await authorizePathRead(protectedFile, [f.root], [{ path: f.root, mode: 'freeze-children' }]), protectedFile);
   } finally {
     await rm(f.base, { recursive: true, force: true });
   }

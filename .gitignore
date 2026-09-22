@@ -10,3 +10,10 @@ chatgpt-mcp-activation/
 chatgpt-mcp-activation.zip
 *.service.local
 *.activation
+
+__pycache__/
+*.pyc
+
+# Per-worktree verification outputs, never release inputs.
+.hotswap-results/
+.hotswap-edit.patch

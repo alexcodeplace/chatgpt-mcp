@@ -71,6 +71,30 @@ test('tool discovery exposes only granted capability families', async () => {
   }
 });
 
+test('tool discovery points agents to named-key operations when key manager is enabled', async () => {
+  const { client, server } = await harness({
+    filesystem: { read: true, roots: ['/tmp'] },
+    shell: { enabled: true, allowedCommands: ['node'] },
+    jobs: { enabled: true, directory: '/tmp/chatgpt-mcp-tool-discovery-jobs', launcher: 'detached' },
+    keyManager: { enabled: true, url: 'http://127.0.0.1:4987', tokenFile: '/tmp/kmgr-token' },
+  });
+  try {
+    const tools = (await client.listTools()).tools;
+    const read = tools.find(tool => tool.name === 'fs.read');
+    const shell = tools.find(tool => tool.name === 'shell.exec');
+    const durable = tools.find(tool => tool.name === 'exec.start');
+    assert.match(read?.description ?? '', /kmgr\.list/);
+    assert.match(read?.description ?? '', /kmgr\.run/);
+    assert.match(shell?.description ?? '', /key value stays inside the broker/);
+    assert.match(durable?.description ?? '', /kmgr\.run/);
+    assert.match(durable?.description ?? '', /key value stays inside the broker/);
+    assert.ok(tools.some(tool => tool.name === 'kmgr.status'));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test('host display master gate omits all display-dependent tools', async () => {
   const { client, server } = await harness({
     application: { enabled: true, applications: { editor: { command: 'editor' } } },
@@ -158,6 +182,37 @@ test('shell tool delegates argument-array execution unchanged', async () => {
     const request = seen as { command: string; args: string[]; timeoutMs: number; signal?: AbortSignal };
     assert.deepEqual({ command: request.command, args: request.args, timeoutMs: request.timeoutMs }, { command: 'node', args: ['--version'], timeoutMs: 100 });
     assert.ok(request.signal instanceof AbortSignal);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('shell admission policy errors preserve the configured MCP blocker message', async () => {
+  let executions = 0;
+  const adapter = fakeAdapter();
+  adapter.classifyExec = () => {
+    throw adapterError(
+      'COMMAND_NOT_ALLOWED',
+      'shell.exec',
+      'Heavy browser workloads are forbidden here. Use the Kubernetes E2E runner instead.',
+      { ruleId: 'deny-browser-e2e-local' },
+    );
+  };
+  adapter.exec = async () => {
+    executions += 1;
+    return { exitCode: 0, stdout: 'must-not-run', stderr: '', durationMs: 1, timedOut: false };
+  };
+  const { client, server } = await harness({ shell: { enabled: true, allowedCommands: ['pnpm'] } }, adapter);
+  try {
+    const result = await client.callTool({ name: 'shell.exec', arguments: { command: 'pnpm', args: ['test:worker-browser'], cwd: '/tmp' } });
+    assert.equal(result.isError, true);
+    const first = result.content[0];
+    const text = first?.type === 'text' ? first.text : '';
+    assert.match(text, /COMMAND_NOT_ALLOWED/);
+    assert.match(text, /Heavy browser workloads are forbidden here\. Use the Kubernetes E2E runner instead\./);
+    assert.match(text, /deny-browser-e2e-local/);
+    assert.equal(executions, 0);
   } finally {
     await client.close();
     await server.close();
@@ -389,4 +444,79 @@ test('filesystem blocklist does not disable unrelated GUI browser or input capab
     await client.close();
     await server.close();
   }
+});
+
+
+test('credential-looking file and command output pass through unchanged', async () => {
+  const payload = 'api_key=sk-test-passthrough-1234567890';
+  const adapter = fakeAdapter();
+  adapter.readFile = async () => payload;
+  adapter.exec = async () => ({ exitCode: 0, stdout: payload, stderr: `stderr:${payload}`, durationMs: 1, timedOut: false });
+  const { client, server } = await harness({
+    filesystem: { read: true, roots: ['/tmp'] },
+    shell: { enabled: true, allowedCommands: ['node'] },
+  }, adapter);
+  try {
+    const file = await client.callTool({ name: 'fs.read', arguments: { path: '/tmp/credential.txt' } });
+    assert.equal((file.structuredContent as { content?: string }).content, payload);
+    const command = await client.callTool({ name: 'shell.exec', arguments: { command: 'node', args: [] } });
+    assert.equal((command.structuredContent as { stdout?: string }).stdout, payload);
+    assert.equal((command.structuredContent as { stderr?: string }).stderr, `stderr:${payload}`);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('system.info does not advertise an output-redaction layer', async () => {
+  const { client, server } = await harness({});
+  try {
+    const result = await client.callTool({ name: 'system.info', arguments: {} });
+    const runtime = (result.structuredContent as { runtime?: Record<string, unknown> }).runtime ?? {};
+    assert.equal('outputRedaction' in runtime, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('key manager tools are opt-in and expose only agent operations', async () => {
+  const { client, server } = await harness({
+    keyManager: { enabled: true, tokenFile: '/tmp/kmgr-test-token' },
+  });
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name).sort();
+    assert.deepEqual(names, ['kmgr.list', 'kmgr.profiles', 'kmgr.run', 'kmgr.status', 'system.info']);
+    const info = await client.callTool({ name: 'system.info', arguments: {} });
+    const capabilities = (info.structuredContent as { capabilities?: Record<string, boolean> } | undefined)?.capabilities;
+    assert.equal(capabilities?.keyManager, true);
+    for (const forbidden of ['kmgr.get', 'kmgr.reveal', 'kmgr.import', 'kmgr.approve', 'kmgr.grant', 'kmgr.delete']) {
+      assert.equal(names.includes(forbidden), false);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+
+test('kmgr.list returns a schema-valid name-only result through the MCP protocol', async (t) => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'kmgr-mcp-roundtrip-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = join(root, 'client');
+  await writeFile(tokenFile, 'synthetic-mcp-client-credential', { mode: 0o600 });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ keys: [{ name: 'synthetic.app.api', secretFile: 'must-not-be-forwarded' }] })) as typeof fetch;
+  try {
+    const { client, server } = await harness({ keyManager: { enabled: true, url: 'https://broker.example', tokenFile } });
+    try {
+      const response = await client.callTool({ name: 'kmgr.list', arguments: { project: 'app' } });
+      assert.equal(response.isError, undefined);
+      assert.deepEqual(response.structuredContent, { keys: [{ name: 'synthetic.app.api' }] });
+      assert.equal(JSON.stringify(response).includes('must-not-be-forwarded'), false);
+    } finally { await client.close(); await server.close(); }
+  } finally { globalThis.fetch = previousFetch; }
 });

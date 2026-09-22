@@ -29,8 +29,26 @@ test('unlisted executable rejects', () => {
   });
 });
 
-test('paths are not accepted as executable names', () => {
-  assert.throws(() => authorizeCommand('/bin/git', [], { ...policy, allowedCommands: ['*'] }));
+test('wildcard and exact path grants allow executable paths without expanding name-only grants', () => {
+  for (const command of ['/usr/bin/git', './scripts/inspect', '../tools/inspect']) {
+    assert.doesNotThrow(() => authorizeCommand(command, [], wildcardPolicy));
+    assert.doesNotThrow(() => authorizeCommand(command, [], { ...policy, allowedCommands: [command] }));
+    assert.throws(() => authorizeCommand(command, [], policy), isCommandNotAllowed);
+  }
+  for (const command of ['', 'git\0status']) {
+    assert.throws(() => authorizeCommand(command, [], wildcardPolicy), isCommandNotAllowed);
+  }
+});
+
+test('executable paths retain explicit agent, privilege and host-display blocks', () => {
+  for (const command of ['/usr/bin/codex', './claudex', '/usr/bin/sudo', './pkexec']) {
+    assert.throws(() => authorizeCommand(command, [], wildcardPolicy), isCommandNotAllowed);
+  }
+  for (const command of ['/usr/bin/grim', './scrot']) {
+    assert.throws(() => authorizeHostDisplaySafeInvocation(command, [], false), isCommandNotAllowed);
+  }
+  assert.throws(() => authorizeHostDisplaySafeInvocation('/bin/bash', ['-c', 'grim /tmp/image.png'], false), isCommandNotAllowed);
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('/usr/bin/git', ['status'], false));
 });
 
 test('explicit wildcard allows executable names', () => {
@@ -89,6 +107,11 @@ test('host display guard preserves ordinary shell, Python, Node, and ffmpeg work
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('python3', ['-c', 'print(1 + 1)'], false));
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('node', ['-e', 'console.log(2)'], false));
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', 'printf ok'], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', "python3 - <<'PY'\nimport json\nfrom pathlib import Path\nprint(json.dumps({'path': str(Path('.'))}))\nPY"], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', "printf '%s\n' 'documentation says import json'"], false));
+  assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', "printf '%s\n' 'documentation says import /tmp/shot.png'"], false));
+  assert.throws(() => authorizeHostDisplaySafeInvocation('bash', ['-lc', 'import /tmp/shot.png'], false), isCommandNotAllowed);
+  assert.throws(() => authorizeHostDisplaySafeInvocation('env', ['import', '-window', 'root', '/tmp/shot.png'], false), isCommandNotAllowed);
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('ffmpeg', ['-i', 'input.mp4', '-c:v', 'copy', 'output.mp4'], false));
   assert.doesNotThrow(() => authorizeHostDisplaySafeInvocation('grim', [], true));
 });

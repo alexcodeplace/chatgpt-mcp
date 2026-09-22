@@ -139,5 +139,15 @@
     "maxRecordings": 8,
     "maxTextBytes": 65536
   },
-  "logLevel": "info"
+  "logLevel": "info",
+  "jobs": {
+    "enabled": false,
+    "launcher": "systemd",
+    "maxConcurrent": 2,
+    "maxStoredJobs": 2048,
+    "maxStoredOutputBytes": 268435456,
+    "workerMemoryBytes": 1073741824,
+    "outputRetentionSeconds": 86400,
+    "retentionSeconds": 604800
+  }
 }

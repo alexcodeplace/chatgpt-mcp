@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { instanceId, equalSecret, routingAbi, jobsAbi, policyFingerprint } from './hotswap/identity.js';
+import { runtimeIdentity } from './diagnostics.js';
+import { diagnosticId, trace, withDiagnosticRequest } from './diagnostics.js';
 import { timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from 'node:http';
@@ -44,7 +48,7 @@ function tokenMatches(header: string | undefined, expected: string): boolean {
   return supplied.length === wanted.length && timingSafeEqual(supplied, wanted);
 }
 
-function requireBearer(req: IncomingMessage, res: ServerResponse, token: string | undefined): boolean {
+export function requireBearer(req: IncomingMessage, res: ServerResponse, token: string | undefined): boolean {
   if (token === undefined) return true;
   if (tokenMatches(req.headers.authorization, token)) return true;
   writeJson(
@@ -56,7 +60,7 @@ function requireBearer(req: IncomingMessage, res: ServerResponse, token: string 
   return false;
 }
 
-function validators(config: Readonly<ChatGptMcpConfig>): {
+export function validators(config: Readonly<ChatGptMcpConfig>): {
   host: (req: IncomingMessage, res: ServerResponse) => boolean;
   origin: (req: IncomingMessage, res: ServerResponse) => boolean;
 } {
@@ -96,11 +100,33 @@ export function createComputerHttpServer(
   });
   const nodeHandler = toNodeHandler(handler);
   const validate = validators(config);
+  const keyPath = process.env.CHATGPT_MCP_ROUTER_KEY_FILE;
+  const routerKey = keyPath ? readFileSync(keyPath, 'utf8').trim() : undefined;
+  let fenced = false;
+  let exchanges = 0;
 
   const server = createServer((req, res) => {
     if (!validate.host(req, res) || !validate.origin(req, res)) return;
 
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
+    if (pathname === '/__hotswap' || pathname === '/__hotswap/retire') {
+      if (!routerKey || !equalSecret(req.headers['x-mcp-route-key'], routerKey)) {
+        writeJson(res, 403, { error: 'router_auth_required' }); return;
+      }
+      const resources = adapter.ownedResources?.() ?? null;
+      const work = concurrency.snapshot();
+      const busy = exchanges > 0 || work.active.total > 0 || work.queued.total > 0;
+      if (pathname.endsWith('/retire')) {
+        if (req.method !== 'POST') { writeJson(res, 405, { error: 'method_not_allowed' }); return; }
+        if (req.headers['x-mcp-route-instance'] !== instanceId || busy || !resources || resources.applications || resources.recordings) {
+          writeJson(res, 409, { error: 'generation_has_owners' }); return;
+        }
+        fenced = true;
+      } else if (req.method !== 'GET') { writeJson(res, 405, { error: 'method_not_allowed' }); return; }
+      writeJson(res, 200, { instanceId, routingAbi, jobsAbi, policyFingerprint: policyFingerprint(config),
+        runtime: runtimeIdentity(config), resources, exchanges, activeCalls: work.active.total, queuedCalls: work.queued.total, fenced });
+      return;
+    }
     if (pathname === '/healthz') {
       if (req.method !== 'GET') {
         writeJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' });
@@ -130,6 +156,11 @@ export function createComputerHttpServer(
       return;
     }
 
+    const expectedInstance = req.headers['x-mcp-route-instance'];
+    if (expectedInstance !== undefined && (expectedInstance !== instanceId || !routerKey || !equalSecret(req.headers['x-mcp-route-key'], routerKey))) {
+      writeJson(res, 409, { error: 'generation_identity_mismatch' }); return;
+    }
+    if (fenced) { writeJson(res, 503, { error: 'generation_retired' }); return; }
     if (!requireBearer(req, res, config.http.token)) return;
     if (req.method === undefined) {
       writeJson(res, 400, { error: 'missing_method' });
@@ -139,7 +170,35 @@ export function createComputerHttpServer(
     // Node's IncomingMessage types model `method` as optional, while the MCP
     // node bridge models it as required. A real server request has a method;
     // the guard above makes this cast the explicit type seam between the two.
-    void nodeHandler(req as Parameters<typeof nodeHandler>[0], res);
+    const transportAbort = new AbortController();
+    const disconnect = () => {
+      if (!res.writableFinished && !transportAbort.signal.aborted) transportAbort.abort();
+    };
+    // A response 'close' is useful but not the ownership boundary: after the
+    // request body is complete, client cancellation can be observed first on
+    // the native request socket. Anchor cancellation to both and remove the
+    // socket listener after a normal response so keep-alive reuse is unaffected.
+    res.once('close', disconnect);
+    req.once('aborted', disconnect);
+    req.socket.once('close', disconnect);
+    if (res.destroyed || req.destroyed || req.aborted || req.socket.destroyed) disconnect();
+    exchanges += 1;
+    withDiagnosticRequest(() => {
+      const requestId = diagnosticId();
+      let delivered = false;
+      res.once('finish', () => { delivered = true; trace('http_response_finished', { requestId, status: res.statusCode }); });
+      res.once('close', () => { if (!delivered) trace('http_response_interrupted', { requestId }); });
+      void Promise.resolve().then(() => nodeHandler(req as Parameters<typeof nodeHandler>[0], res)).catch(() => {
+        trace('http_handler_failed', { requestId });
+        if (!res.headersSent && !res.destroyed) writeJson(res, 500, { error: 'backend_handler_failure', diagnosticId: requestId });
+        else if (!res.destroyed) res.end();
+      }).finally(() => {
+        res.off('close', disconnect);
+        req.off('aborted', disconnect);
+        req.socket.off('close', disconnect);
+        exchanges -= 1;
+      });
+    }, transportAbort.signal);
   });
 
   return { server, closeHandler: handler.close };

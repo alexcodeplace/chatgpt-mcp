@@ -7,7 +7,7 @@ import { registerTools } from './tools/register-tools.js';
 
 export const serverInfo = {
   name: '@platform-modules/chatgpt-mcp',
-  version: '0.1.0',
+  version: '0.2.0',
 } as const;
 
 export function createComputerMcpServer(

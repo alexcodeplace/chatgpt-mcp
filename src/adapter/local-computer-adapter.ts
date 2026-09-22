@@ -1,3 +1,4 @@
+import { replaceUtf8 } from '../execution/atomic-file.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
@@ -5,7 +6,7 @@ import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
-import { authorizePath, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation } from '../policy/filesystem.js';
+import { authorizePath, authorizePathRead, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation, authorizeShellFilesystemRead } from '../policy/filesystem.js';
 import { spawnBounded } from '../execution/bounded-process.js';
 import { spawnSystemdIsolated } from '../execution/systemd-isolated-process.js';
 import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRuntime, nonInteractiveShellArgs, nonInteractiveShellEnvironment, sanitizeHostDisplayEnvironment, validateShellEnvironment } from '../policy/shell.js';
@@ -117,6 +118,7 @@ function validateDisplay(display: string, operation: string): string {
 
 export class LocalComputerAdapter implements ComputerAdapter {
   private readonly applications = new Map<string, ChildProcess>();
+  private readonly closingApplications = new Map<string, ChildProcess>();
   private readonly screenRecordings = new Map<string, ActiveScreenRecording>();
 
   constructor(private readonly config: Readonly<ChatGptMcpConfig>) {}
@@ -160,7 +162,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
     const limit = Math.min(maxBytes ?? this.config.filesystem.maxReadBytes, this.config.filesystem.maxReadBytes);
     try {
-      const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      const path = await authorizePathRead(requestedPath, this.config.filesystem.roots, this.config.filesystem.blocklist, operation);
       const metadata = await stat(path);
       if (!metadata.isFile()) throw adapterError('INVALID_INPUT', operation, 'Path is not a regular file.', { path });
       if (metadata.size > limit) {
@@ -202,6 +204,21 @@ export class LocalComputerAdapter implements ComputerAdapter {
     } catch (error) {
       mapOsError(error, operation, { path: requestedPath, mode });
     }
+  }
+
+  async replaceFile(requestedPath: string, content: string, expectedSha256: string | null): Promise<{ sha256: string }> {
+    const operation = 'fs.replace';
+    requireCapability(this.config.filesystem.write && this.config.filesystem.read, operation, 'Atomic replacement requires filesystem read and write grants.');
+    if (Buffer.byteLength(content, 'utf8') > this.config.filesystem.maxWriteBytes) throw adapterError('OUTPUT_LIMIT', operation, 'Replacement exceeds the write byte limit.');
+    try {
+      const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(path, this.config.filesystem.blocklist, operation);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
+      return await replaceUtf8(path, content, expectedSha256, this.config.filesystem.maxReadBytes, async temporary => {
+        await authorizePath(temporary, this.config.filesystem.roots, operation);
+        await authorizePathEntryCreation(temporary, this.config.filesystem.blocklist, operation);
+      });
+    } catch (error) { return mapOsError(error, operation, { path: requestedPath }); }
   }
 
   async makeDirectory(requestedPath: string, recursive: boolean): Promise<void> {
@@ -262,6 +279,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     if (request.cwd !== undefined) {
       cwd = await authorizePath(request.cwd, this.config.filesystem.roots, operation);
     }
+    await authorizeShellFilesystemRead(request.command, request.args, cwd, this.config.filesystem.blocklist, operation);
     await authorizeShellFilesystemMutation(request.command, request.args, cwd, this.config.filesystem.blocklist, operation);
     const env = nonInteractiveShellEnvironment(
       validateShellEnvironment(request.env, this.config.shell.allowEnvironment, this.config.desktop.hostDisplayAccess),
@@ -380,9 +398,16 @@ export class LocalComputerAdapter implements ComputerAdapter {
   }
 
   private pruneApplications(): void {
-    for (const [handle, child] of this.applications) {
-      if (child.exitCode !== null || child.signalCode !== null) this.applications.delete(handle);
+    for (const owned of [this.applications, this.closingApplications]) {
+      for (const [handle, child] of owned) {
+        if (child.exitCode !== null || child.signalCode !== null) owned.delete(handle);
+      }
     }
+  }
+
+  ownedResources(): { applications: number; recordings: number } {
+    this.pruneApplications();
+    return { applications: this.applications.size + this.closingApplications.size, recordings: this.screenRecordings.size };
   }
 
   async launchApplication(name: string, args: readonly string[], display: string): Promise<ApplicationLaunchResult> {
@@ -402,7 +427,7 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
 
     this.pruneApplications();
-    if (this.applications.size >= this.config.application.maxTracked) {
+    if (this.applications.size + this.closingApplications.size >= this.config.application.maxTracked) {
       throw adapterError('OUTPUT_LIMIT', operation, 'Tracked application handle limit reached.', {
         maximum: this.config.application.maxTracked,
       });
@@ -435,11 +460,13 @@ export class LocalComputerAdapter implements ComputerAdapter {
     requireCapability(this.config.application.enabled, operation, 'Application closing is disabled.');
     const child = this.applications.get(handle);
     if (child === undefined) throw adapterError('NOT_FOUND', operation, 'Application handle is unknown or expired.', { handle });
-    this.applications.delete(handle);
     if (child.exitCode !== null || child.signalCode !== null) {
+      this.applications.delete(handle);
       throw adapterError('NOT_FOUND', operation, 'Application has already exited.', { handle, pid: child.pid });
     }
     try {
+      this.applications.delete(handle);
+      this.closingApplications.set(handle, child);
       if (!child.kill('SIGTERM')) {
         throw adapterError('OS_ERROR', operation, 'Operating system did not accept the application termination signal.', {
           handle,
@@ -447,6 +474,8 @@ export class LocalComputerAdapter implements ComputerAdapter {
         });
       }
     } catch (error) {
+      this.closingApplications.delete(handle);
+      this.applications.set(handle, child);
       mapOsError(error, operation, { handle, pid: child.pid });
     }
   }
@@ -685,9 +714,12 @@ export class LocalComputerAdapter implements ComputerAdapter {
     } catch (error) {
       return mapOsError(error, operation, { handle, path, display });
     } finally {
-      this.screenRecordings.delete(handle);
-      child.stdin?.destroy();
-      child.stderr?.destroy();
+      // A failed termination is still owned until the child actually exits.
+      if (child.exitCode !== null || child.signalCode !== null) {
+        this.screenRecordings.delete(handle);
+        child.stdin?.destroy();
+        child.stderr?.destroy();
+      }
     }
   }
 

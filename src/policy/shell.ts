@@ -88,7 +88,8 @@ const HIGH_SIGNAL_HOST_CAPTURE_PATTERNS: readonly RegExp[] = [
   /\/tmp\/\.X11-unix\/X\d+\b/i,
 ];
 
-const WRAPPED_CAPTURE_COMMAND = /(?:^|[\s;&|()])(?:deepin-screenshot|flameshot|gnome-screenshot|gnome-shell-screenshot|grim|grimshot|import|ksnip|maim|mate-screenshot|scrot|shutter|spectacle|wf-recorder|wl-screenrec|xwd|xfce4-screenshooter)(?=$|[\s;&|()])/i;
+const WRAPPED_CAPTURE_COMMAND = /(?:^|[\s;&|()])(?:deepin-screenshot|flameshot|gnome-screenshot|gnome-shell-screenshot|grim|grimshot|ksnip|maim|mate-screenshot|scrot|shutter|spectacle|wf-recorder|wl-screenrec|xwd|xfce4-screenshooter)(?=$|[\s;&|()])/i;
+const WRAPPED_IMAGEMAGICK_IMPORT = /(?:^|(?:&&|\|\||[;()])\s*)import(?=\s+(?:(?:-(?:window|screen|frame|silent|snaps|monitor|pause|quality|resize|crop|display|density)\b)|[^;\n|()]*\.(?:png|jpe?g|gif|webp|bmp|tiff?)\b))/i;
 
 export interface ShellLimits {
   enabled: boolean;
@@ -203,8 +204,8 @@ export function authorizeCommand(command: string, args: readonly string[], polic
   if (!policy.enabled) {
     throw adapterError('CAPABILITY_DISABLED', 'shell.exec', 'Shell execution is disabled.');
   }
-  if (command.length === 0 || command.includes('/') || command.includes('\\')) {
-    throw adapterError('COMMAND_NOT_ALLOWED', 'shell.exec', 'Command must be an allowed executable name.', { command });
+  if (command.length === 0 || command.includes('\0')) {
+    throw adapterError('COMMAND_NOT_ALLOWED', 'shell.exec', 'Command must be a non-empty executable name or path without NUL bytes.', { command });
   }
   if (!policy.allowedCommands.includes('*') && !policy.allowedCommands.includes(command)) {
     throw adapterError('COMMAND_NOT_ALLOWED', 'shell.exec', 'Executable is not in the configured allow-list.', { command });
@@ -224,7 +225,7 @@ export function authorizeHostDisplaySafeInvocation(
 ): void {
   if (hostDisplayAccess) return;
 
-  const executable = command.toLowerCase();
+  const executable = basename(command).toLowerCase();
   if (HOST_CAPTURE_EXECUTABLES.has(executable)) {
     throw adapterError(
       'COMMAND_NOT_ALLOWED',
@@ -244,7 +245,7 @@ export function authorizeHostDisplaySafeInvocation(
     );
   }
 
-  if (SHELL_OR_WRAPPER_EXECUTABLES.has(executable) && WRAPPED_CAPTURE_COMMAND.test(payload)) {
+  if (SHELL_OR_WRAPPER_EXECUTABLES.has(executable) && (WRAPPED_CAPTURE_COMMAND.test(payload) || WRAPPED_IMAGEMAGICK_IMPORT.test(payload) || args.some(arg => WRAPPED_IMAGEMAGICK_IMPORT.test(arg)))) {
     throw adapterError(
       'COMMAND_NOT_ALLOWED',
       'shell.exec',

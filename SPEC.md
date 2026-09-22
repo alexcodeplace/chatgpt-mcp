@@ -5,6 +5,105 @@
 **Runtime:** Node.js 22+, TypeScript, ESM  
 **Primary deployment:** private/local computer reachable from ChatGPT through an MCP connection/tunnel
 
+## Human-facing experience and Inspect (owner-approved 2026-09-14)
+
+This maintained specification adopts the interaction principles in the
+[Spargax experience/Inspect contract](https://github.com/alexcodeplace/vibeclub/blob/0bd25d33ea614ebcb58b23f33abe25483e2fd634/docs/specs/spargaxos-product.md#experience-and-inspect-contract)
+for product-owned human onboarding, settings and graphical management integrations.
+This is not a new server UI requirement, protocol session, autonomous planner or
+interactive per-tool approval layer. The new presentation behavior is required
+but implementation and runtime acceptance are **OPEN**.
+
+**MCP-UX01.** First human-facing product onboarding asks Choose your experience:
+Regular / Pro with equal prominence, no preselection, guided versus configurable
+setup descriptions, and You can change this anytime in Settings > Experience.
+It precedes product account/connection/configuration steps. Pro gets supported
+configuration from the beginning, not after a Regular wizard. Store only the
+non-secret human presentation preference in its owning installer/management host;
+never create implicit MCP client/session state. Noninteractive installation and
+machine API calls remain noninteractive, with stable explicit inputs and no new
+mandatory UI/account dependency. An integrated surface may inherit an explicitly
+chosen host mode; standalone interactive onboarding asks when no choice exists.
+
+**MCP-UX02.** Settings > Experience changes the human interface and help, not
+capability grants, endpoint bindings, credential access, command policy, admission
+limits, routing, tunnel credentials or a running job/service. Retain drafts and
+hidden advanced values; save only deliberately changed settings through the existing
+validated configuration authority. Regular and Pro both disclose the actual granted
+scope and consequences before a deliberate configuration change. In particular,
+the documented broad quick-install configuration must not be called least-privilege
+or selected merely because the user chooses Pro. The chosen experience applies to
+setup errors, connection verification, maintenance and recovery as well as settings.
+
+### MCP human settings visibility
+
+These rules classify an existing human control or a supported future management
+integration, not permission to invent flags, endpoints or unimplemented capabilities.
+Pro-only means omitted from Regular editable UI, with a read-only effective summary
+and explicit Edit in Pro navigation from settings search/deep links. Existing
+owner-authorized CLI/configuration mechanisms remain usable in either mode.
+
+| ID | Regular / common | Pro-only supported configuration |
+| --- | --- | --- |
+| MCP-S01 Experience / presentation | First choice, mode setting, supported locale/accessibility/help and accurate connection state. | Technical-detail/density preference if supported; no protocol semantics change. |
+| MCP-S02 Connection / installation | Guided supported setup, scope review, required secure input, explicit connection test, status and safe update/rollback. | Existing transport/endpoint/tunnel/profile configuration fields. Mode alone changes none of them. |
+| MCP-S03 Capability grants | Actual effective scope, risk/consequence explanation and existing guided permission choices or repair. | Detailed allowed roots, executables, services, apps and display grants using the existing validated schema; no bypass or secret reveal. |
+| MCP-S04 Execution / limits | Job status, overload explanation, existing authorized cancel and bounded recovery. | Supported command policies, deadlines, concurrency, admission and remote routing configuration. Inspector never executes a probe job. |
+| MCP-S05 Credentials / named-key operations | Existing protected enrollment/reference status and owner-owned decision workflow where supported. | Supported reference/adapter configuration; neither mode adds approval authority or replaces the existing broker. |
+| MCP-S06 Diagnostics / lifecycle | Safe management diagnostics copy/export, version/health, actual update result and required recovery. | Supported verbosity/retention/backend settings. Existing tool-output contract below is unchanged. |
+
+### MCP inspectable management objects
+
+In an eligible graphical management surface, right-click > Inspect, More actions >
+Inspect, Shift+F10/Context Menu key and a visible touch menu open the same read-only
+Summary / Details / Evidence panel. The native context menu remains on unrelated
+page content, selected text, links, code and editable/secret fields. Opening Inspect
+does not launch another tool, shell, test, job, tunnel or service operation.
+
+| ID / eligible item | Safe details and evidence |
+| --- | --- |
+| MCP-I01 Connection / backend / tunnel status | Safe endpoint/profile identity without credential-bearing URL parts, runtime/protocol version, declared capabilities, observation time and actual readiness/error. Existing status owner only. |
+| MCP-I02 Capability / effective policy row | Stable tool/rule identity, allowed scope, configured limits, precedence and source/version from existing parsed configuration. No raw secret environment or unrelated filesystem inspection. |
+| MCP-I03 Durable job / operation receipt | Opaque job/operation identity, authorized lifecycle/result, bounded timings, ownership, transport/output limits and safe error code. Raw stdout, file contents, arguments or tool outputs are not automatically copied into the inspector. |
+| MCP-I04 Release / install / update receipt | Candidate/active identity, owned paths/resources, verification/rollback evidence and actual result/warnings from the existing lifecycle owner. No deployment from Inspect. |
+| MCP-I05 Health / diagnostic / error item | Component/request identity, safe status/failure reason, timestamps/freshness and related authorized objects; no whole-process environment, transcript or credential dump. |
+| MCP-I06 Named-key reference / request status | Non-secret name/reference, request identity, pending/approved/denied/expired/execution state and permitted owner-review destination, only through the existing broker adapter. No key value, owner authentication material or approval action. |
+
+The management host obtains an allowlisted, authorized metadata projection from the
+existing owner. It must not call a raw data-bearing tool simply to serialize its
+entire result into the drawer. Handle denied/stale/unavailable/deleted/late data and
+clear inaccessible caches on identity changes. Copy summary, safe field copies and
+an explicit inspection-report export require a user action, inclusion preview and
+safe output; no automatic upload. Related links reauthorize and navigate to existing
+operations rather than mutate from the panel. Keep reads cancellable and bounded.
+
+**MCP-UX03. Verbatim-output boundary.** These inspector projections are a distinct
+human management view, not a filter around `fs.read`, `shell.exec`, durable job
+output or any other existing MCP result. They do not restore shared output redaction,
+block authorized credential use or change the Verbatim tool-output contract below.
+The broker's named-key policy and owner decision UI remain separate authorities.
+Never mutate an existing result schema to make Regular and Pro look different.
+
+**MCP-A01.** Prove first-choice setup, restart/inheritance/override, settings changes
+and hidden-value/draft preservation while a job runs. Test both modes against all
+MCP-S rows; noninteractive install/API behavior and effective grants remain unchanged.
+
+**MCP-A02.** Exercise all MCP-I items in the hosting GUI with mouse, keyboard and
+touch, native-menu preservation, accessible panel/focus, stale/denied/late data,
+safe copy/export and no tool execution. Prove credential values do not enter the
+metadata projection while existing authorized verbatim tool-output regression
+fixtures still pass without censorship. No new transcript/log collection.
+
+**MCP-A03.** Record each requirement's exact code/release, host/platform/locale,
+evidence and gap. Audits repair implementation instead of weakening this maintained
+spec or reclassifying missing UI as complete. Current runtime/installation tests do
+not prove this new human-interface scope without the mode/Inspect journeys.
+
+Shared-contract adoption is pinned to reviewed revision `0bd25d33ea614ebcb58b23f33abe25483e2fd634`.
+The maintained source is `alexcodeplace/vibeclub:docs/specs/spargaxos-product.md`.
+When that contract changes, review and update this adoption and the affected local
+matrices together; do not silently revert to older mockups or infer new acceptance.
+
 ## 1. Purpose
 
 `chatgpt-mcp` is a thin MCP server that gives ChatGPT a controlled, typed interface for taking actions on a computer.
@@ -251,7 +350,7 @@ Execute one local command and wait for completion.
 
 Input:
 
-- `command` — executable name;
+- `command` — executable name or path;
 - `args` — argument array;
 - optional `cwd`;
 - optional `env` additions;
@@ -385,7 +484,7 @@ The filesystem policy implementation is a single reusable module used by every f
 
 Requirements:
 
-- executable allow-list is checked before spawn;
+- executable allow-list is checked before spawn; `*` accepts names and paths, while a restricted list matches the exact requested name/path (never a path's basename);
 - `cwd`, when provided, must satisfy configured filesystem/shell roots;
 - execution timeout is bounded by server configuration;
 - stdout/stderr are bounded to prevent unbounded memory use;
@@ -577,3 +676,47 @@ The following changes are architectural and must update this specification befor
 - changing the public tool namespace/schema incompatibly;
 - moving OS-specific logic into MCP handlers instead of the adapter seam;
 - adding an internal interactive approval workflow as a mandatory execution step.
+
+
+## 21. Reliability revision (2026-09-13)
+
+The public protocol remains stateless. Optional durable jobs extend the explicit-handle contract, not the MCP session model. `jobs.enabled` plus a shell grant exposes `exec.start`, `exec.status`, `exec.output`, `exec.cancel`, and `exec.list`. One process-wide job store owns admission for the configured directory. Its executor workers call the existing computer adapter/policy layer and use private persistent reservations and one-time worker claims. No transport error automatically replays a mutation. Worker death or ambiguous launch acknowledgement yields an unknown outcome requiring reconciliation.
+
+Systemd-backed jobs survive backend restarts. The detached launcher does not promise identical service-manager semantics. Output and ledgers have separate bounded retention and capacity; unknown outcomes are not automatically evicted or replayed. Only one active backend submits new work to a job directory. The detailed contract and retention defaults are in `docs/RELIABILITY.md`.
+
+A read+write grant on an adapter implementing `replaceFile` exposes `fs.replace(path, content, expectedSha256)`. It stages and syncs content before atomic replacement, rejects symlinks and frozen directory mutations, and rejects stale hashes. It is not a kernel CAS against non-cooperating writers. Legacy `fs.write` retains its earlier semantics.
+
+`system.info.runtime` includes release identity, loaded configuration fingerprint, process identity and durable-execution availability. New error codes are `CONFLICT` and `OUTCOME_UNKNOWN`; `OVERLOADED` remains capacity pressure, not a permission or tunnel diagnosis. Diagnostics must not contain request arguments, environment values, output or credentials.
+
+Recovery is a separate local supervisor with one locked backend owner and independent per-profile states. It checks fresh MCP capabilities and control-plane polling, never restores permissions/configuration automatically, persists restart budgets before actions, and performs no unconditional restart loop. Deployments share that lock, verify an immutable release inventory, exercise a private candidate, arm an independent rollback timer, and preserve the previous backend's running resources. `docs/DESKTOP-UPDATE.md` defines the local-agent rollout procedure and platform limitations.
+
+## Verbatim tool-output contract (2026-09-14)
+
+Owner requirement: the MCP must not rewrite successful tool results merely because text resembles a credential. Authorized reads and commands return their adapter-produced data unchanged.
+
+1. No shared output-redaction wrapper is applied to registered tools. Textual and structured results, errors, process arguments, URLs, file contents, stdout, and stderr pass through unchanged, subject to normal schema validation, capability checks, byte limits, and transport limits.
+2. `fs.read` does not classify or censor credential-looking paths or contents. Files remain accessible only inside explicitly granted filesystem roots and under the existing filesystem policy.
+3. `shell.exec` preserves child stdout/stderr exactly as returned by the adapter. Shell authorization, environment policy, runtime/output limits, host-display rules, routing, and isolation behavior are unchanged.
+4. Durable workers persist the adapter result without secret-value transformation. `exec.output` paginates the stored stdout/stderr verbatim, including records created before this revision. Request files remain private and are deleted before execution; ledger/output retention and capacity rules are unchanged.
+5. Runtime metadata must not claim that output redaction is active. Obsolete `outputRedaction` configuration is not part of the parsed public configuration contract. Existing configuration files containing unknown legacy keys may continue to parse according to the schema's unknown-key behavior, but those keys have no runtime effect.
+6. Removing output redaction does not broaden capability grants or disable upstream platform safety controls, OS permissions, filesystem blocklists, shell policy, service allowlists, transport limits, or durable-job privacy permissions.
+7. Regression acceptance includes credential-looking file content, stdout, stderr, structured payloads, and durable output surviving the full MCP boundary byte-for-byte while existing authorization and size limits still pass their prior tests.
+
+## Optional named-key operation adapter
+
+The [named-key consumer contract](docs/specs/NAMED-KEY-OPERATIONS.md) defines
+the optional deck-kmgr integration. Overdeck owns credential custody, enrollment,
+decision UI, and the authenticated Botmaster reply workflow. This MCP exposes
+only name discovery, supported operation profiles, typed operation submission,
+and durable status. It never obtains provider credentials or owner-decision
+authority. The integration is disabled until explicitly enrolled.
+
+This is independent of the verbatim-output contract above: ordinary filesystem
+and shell tools are not modified or censored by the key-manager adapter. Its
+name-only API projects a defined response schema; it is not a replacement
+redaction wrapper around other tools.
+
+
+## Hot-swappable managed runtime
+
+[Live backend replacement](docs/specs/HOT-SWAP.md) is the owner-directed contract for continuous tunnel/router operation, per-generation ownership, cancellation, rollback and Overdeck host/VM deployment. It supersedes idle-window tunnel cutover for managed backend updates.

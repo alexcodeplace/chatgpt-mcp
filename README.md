@@ -1,5 +1,13 @@
 # chatgpt-mcp
 
+## Human-interface specification authority
+
+The owner-approved [Regular/Pro and Inspect requirements](SPEC.md#human-facing-experience-and-inspect-owner-approved-2026-09-14)
+define human onboarding and management presentation. They are not yet advertised
+as implemented by this documentation change. Machine tool contracts, configured
+grants, verbatim output and existing secret-broker policy are unchanged. No new
+mandatory server GUI or interactive tool-approval layer is introduced.
+
 A stateless MCP server that exposes explicitly configured capabilities on a Linux computer to ChatGPT or any compatible MCP client.
 
 ```text
@@ -62,6 +70,12 @@ Verify the connection with system.info and an allowed directory read, without
 changing project files or touching my active browser sessions. Finish with the
 connection details, actual test results, status commands and rollback plan.
 ```
+
+## Reliability updates and existing installations
+
+For an existing installation, use the identified blue/green release workflow in [Reliability operation](docs/RELIABILITY.md), not an in-place reinstall. The initial installer preserves configuration and pins tunnel-client 0.0.14. The upgrade path additionally verifies an immutable runtime, tests a candidate, coordinates recovery, switches tunnels with rollback protection, and leaves the previous backend's active work untouched.
+
+Long operations can use opt-in durable `exec.start/status/output/cancel/list` tools. `fs.replace` provides atomic expected-hash file replacement without changing legacy `fs.write` semantics. `system.info.runtime` identifies the actual running release and configuration. [Desktop-agent update instructions](docs/DESKTOP-UPDATE.md) cover local Linux/systemd rollout when the desktop connector is unreachable.
 
 ## Capabilities
 
@@ -285,6 +299,7 @@ git clone https://github.com/alexcodeplace/chatgpt-mcp.git
 cd chatgpt-mcp
 corepack pnpm@11.20.0 install
 corepack pnpm@11.20.0 gate
+python3 -m unittest discover -s test -p '*_test.py' -v
 ```
 
 `pnpm gate` runs type checking, behavioral tests, and the TypeScript build.
@@ -344,6 +359,11 @@ The HTTP backend uses one process-wide admission controller shared by every stat
 
 A shell call without `timeoutMs` uses `shell.defaultRuntimeMs` (30 seconds by default, capped by `shell.maxRuntimeMs`). A caller that explicitly requests more than the short default is admitted as long-running local shell work. `concurrency.reservedInteractiveShellSlots` keeps capacity available for short calls while long work is active; its default is 2 when `shellMaxConcurrent` permits it. This makes commands such as a multi-minute `kubectl wait` opt in to the long-running pool instead of silently occupying an interactive slot for the full shell maximum.
 
+The shell maximum is a cap, not the timeout used for every call. The built-in `shell.maxRuntimeMs` default and minimal example are 120000 (2 minutes); the full installer example uses 600000 (10 minutes). Both use a 30000 (30-second) default when `timeoutMs` is omitted. For a command that may take five minutes, pass `timeoutMs: 300000` and configure `shell.maxRuntimeMs` to at least 300000. Explicit timeouts above the configured maximum are capped. The supported shell maximum is 3600000 (1 hour).
+
+A configuration with `"maxRuntimeMs": 45000` sets a 45-second ceiling; it is not the repository default. The installer preserves an existing `config.local.json`, so updating the code does not replace an old runtime limit. Check the configuration used by the running service, not just the example file. Long work should use the opt-in durable `exec.start/status/output` tools when available; those jobs also respect the shell runtime limits.
+
+
 The defaults can be changed through the `concurrency` object in the JSON configuration. Keep `reservedControlSlots < maxConcurrent`, `shellMaxConcurrent <= maxConcurrent - reservedControlSlots`, and `reservedInteractiveShellSlots < shellMaxConcurrent`.
 
 ### Optional Kubernetes execution
@@ -351,6 +371,36 @@ The defaults can be changed through the `concurrency` object in the JSON configu
 `chatgpt-mcp` is local-only by default. The optional `execution.kubernetes` backend can move explicitly eligible `shell.exec` calls into isolated Kubernetes pods, while filesystem, process, service, application, browser, desktop, and non-routed shell operations retain the existing local-host semantics. Kubernetes support is distribution-neutral: K3s is supported, but no K3s, Tailscale, node-name, namespace, registry, CNI, storage-class, or hostPath assumption is compiled into the package.
 
 The backend is opt-in: `execution.kubernetes.enabled` defaults to `false`, `execution.defaultBackend` is `local`, and an empty `remoteCommands`/`heavyCommandPatterns` set routes nothing remotely. With Kubernetes disabled, startup does not invoke or probe `kubectl`; existing configuration files remain local-only.
+
+#### Generic command policies
+
+`execution.commandPolicies` is an ordered, backend-neutral policy layer for commands submitted through MCP. Rules are evaluated before executable resolution for both `shell.exec` and durable `exec.start`; the first matching rule wins. A rule can match the raw `command`, the request `cwd`, and/or a canonical `invocation`. Each matcher is a JavaScript regular-expression string. The canonical invocation is `JSON.stringify([command, ...args])`, so argument boundaries are deterministic even when an argument contains whitespace or shell punctuation.
+
+Actions are `allow`, `route`, and `deny`. `allow` forces normal local execution and stops legacy routing. `route` selects either `local` or `kubernetes`; an explicit Kubernetes route is fail-closed if that backend is disabled, has no image, or (for `shell.exec`) the request has no explicit `cwd`. `deny` returns `COMMAND_NOT_ALLOWED` with the configured message and the matching `ruleId`. No deployment-specific command names, cluster conventions, or blocker text are compiled into the package.
+
+```json
+{
+  "execution": {
+    "commandPolicies": [
+      {
+        "id": "remote-analysis",
+        "match": { "invocation": "(?:typecheck|lint|test)" },
+        "action": { "type": "route", "backend": "kubernetes" }
+      },
+      {
+        "id": "block-local-watchers",
+        "match": { "invocation": "(?:--watch|dev|serve)" },
+        "action": {
+          "type": "deny",
+          "message": "This workload is disabled on this host. Use the configured remote runner instead."
+        }
+      }
+    ]
+  }
+}
+```
+
+If no command policy matches, the existing `localOnlyCommands`, `remoteCommands`, and `heavyCommandPatterns` behavior is preserved for backward compatibility. Policies see the MCP request itself; they cannot retroactively inspect arbitrary grandchildren hidden behind an allowed wrapper, so deployments that permit opaque wrapper commands should match those wrappers or add a host-side execution backstop.
 
 All deployment details are configuration, including the Kubernetes client command/arguments, kubeconfig/context, namespace, executor image and pull policy/secrets, service account, remote/local-only routing rules, remote concurrency, workspace path/excludes/archive limit, resource requests/limits, node selectors, tolerations, labels/annotations, volumes/mounts, startup/cleanup limits, required commands/environment, and optional executable-version checks. Keep installation-specific values such as private registry names, cluster contexts, Tailscale addresses, and node labels in an untracked/private `config.local.json`, not in public defaults.
 
@@ -372,6 +422,14 @@ GET /metrics  JSON limits, active/queued counts, peaks, and overload/cancellatio
 
 The installer also applies conservative systemd containment to the shared backend (`TimeoutStopSec=5`, `TasksMax=512`, `LimitNOFILE=65536`, `MemoryHigh=6G`, `MemoryMax=9G`, `CPUWeight=80`). HTTP shutdown gives in-flight connections two seconds to drain before they are force-closed, preventing a restart from hanging behind a large request backlog. These are last-resort host guardrails; normal overload should be handled by admission control first. The tunnel watchdog intentionally checks `/healthz`, not `/readyz`, so a healthy busy server is never restarted merely for being saturated.
 
+## Credentials and command output
+
+Authorized commands may use local API keys, deployment tokens, and other credentials under the same filesystem, shell, and environment grants as any other data. The MCP does not apply secret-value output redaction. `fs.read`, `shell.exec`, tool errors, process metadata, URLs, and durable command output are returned as produced by the authorized adapter, subject only to the existing capability, byte, transport, and retention limits.
+
+Durable job requests remain private on disk while pending: request files use restrictive permissions and are deleted by the worker before execution. Durable stdout and stderr are stored in the private job ledger and returned verbatim through `exec.output` until retention expires. Operators should therefore grant only the filesystem roots, commands, environment access, and services they intend the connected client to observe.
+
+This behavior is deliberately transparent: credential-looking strings are not rewritten, credential files are not specially censored, and `system.info.runtime` does not advertise a redaction layer. Upstream platform safety controls, OS permissions, filesystem blocklists, shell policy, and MCP capability grants remain separate controls.
+
 ## Filesystem blocklist
 
 `filesystem.blocklist` can protect the direct entries of selected directories while leaving existing project contents writable. It is an accidental-destruction guard, not a shell sandbox.
@@ -381,6 +439,8 @@ With `mode: "freeze-children"`, native MCP filesystem mutations reject creation,
 Crucially, enabling this policy does **not** enable systemd isolation, sudo, `deck-sudo`, mount namespaces, or privilege escalation. `execution.localIsolation.enabled` is the only switch that selects the systemd-isolated executor. If it is `false`, `shell.exec` always uses normal user-level process execution.
 
 Routine `shell.exec` is also authentication-noninteractive: direct `sudo`, `su`, and `pkexec` are refused, SSH runs in batch mode, and credential/askpass UI is disabled. Explicit `deck-sudo` remains available when the deployment intentionally provides it. This prevents agents from surfacing root/password dialogs while preserving owner-authorized noninteractive privilege paths.
+
+With `shell.allowedCommands: ["*"]`, executable names and paths such as `git`, `/usr/bin/git`, and `./scripts/inspect` are accepted. Explicit command policies, filesystem blocklist rules, and capability-specific restrictions still apply. Restricted allow-lists match the exact requested name or path. A pre-dispatch refusal by the connected AI platform is outside the MCP process; inspect the actual tool error before attributing it to MCP policy.
 
 This guard deliberately does not claim to stop arbitrary language runtimes or custom wrappers from mutating the filesystem. Use normal OS permissions/snapshots for a hard security boundary.
 
@@ -404,9 +464,10 @@ corepack pnpm@11.20.0 typecheck
 corepack pnpm@11.20.0 test
 corepack pnpm@11.20.0 build
 corepack pnpm@11.20.0 gate
+python3 -m unittest discover -s test -p '*_test.py' -v
 ```
 
-GitHub Actions runs the same gate on pushes and pull requests and syntax-checks the installer scripts.
+GitHub Actions runs the same TypeScript gate, Python recovery/deployment fault tests, and installer syntax checks on pushes and pull requests. Dependencies install from the frozen lockfile.
 
 ## Platform limitations
 

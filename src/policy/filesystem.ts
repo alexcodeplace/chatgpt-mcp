@@ -4,12 +4,12 @@ import { adapterError } from '../errors.js';
 
 export interface FilesystemBlockRule {
   readonly path: string;
-  readonly mode: 'freeze-children';
+  readonly mode: 'freeze-children' | 'deny-read';
   readonly message?: string | undefined;
 }
 
-
 const DEFAULT_FREEZE_MESSAGE = 'Filesystem policy prevents changing entries directly inside this directory.';
+const DEFAULT_READ_DENY_MESSAGE = 'Filesystem policy prevents reading this path.';
 
 function isWithin(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
@@ -52,7 +52,7 @@ function blocked(rule: FilesystemBlockRule, operation: string, candidate: string
   throw adapterError(
     'PATH_NOT_ALLOWED',
     operation,
-    rule.message ?? DEFAULT_FREEZE_MESSAGE,
+    rule.message ?? (rule.mode === 'deny-read' ? DEFAULT_READ_DENY_MESSAGE : DEFAULT_FREEZE_MESSAGE),
     { path: candidate, blocklistPath: resolve(rule.path), mode: rule.mode },
   );
 }
@@ -123,9 +123,107 @@ export async function authorizePathEntryMutation(
   if (rule !== undefined) blocked(rule, operation, candidate);
 }
 
-
 const SHELL_CREATE_COMMANDS = new Set(['mkdir']);
 const SHELL_REMOVE_COMMANDS = new Set(['rmdir', 'rm']);
+const SHELL_DIRECT_READ_COMMANDS = new Set([
+  'cat', 'head', 'tail', 'strings', 'wc', 'base64', 'xxd', 'hexdump', 'od',
+  'md5sum', 'sha1sum', 'sha224sum', 'sha256sum', 'sha384sum', 'sha512sum', 'b2sum',
+  'cp', 'grep', 'sed', 'awk',
+]);
+
+const SYSTEMD_RUN_OPTIONS_WITH_VALUE = new Set([
+  '-p', '--property', '--unit', '--description', '--slice', '--service-type',
+  '--uid', '--gid', '--nice', '--working-directory', '--setenv', '--umask',
+]);
+
+function unwrapSystemdRun(args: readonly string[]): { command: string; args: readonly string[] } | undefined {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === undefined) return undefined;
+    if (arg === '--') {
+      index += 1;
+      break;
+    }
+    if (!arg.startsWith('-') || arg === '-') break;
+    if (arg.includes('=')) {
+      index += 1;
+      continue;
+    }
+    if (SYSTEMD_RUN_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  const command = args[index];
+  return command === undefined ? undefined : { command, args: args.slice(index + 1) };
+}
+
+function unwrapEnv(args: readonly string[]): { command: string; args: readonly string[] } | undefined {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === undefined) return undefined;
+    if (arg === '--') {
+      index += 1;
+      break;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg === '-u' || arg === '--unset' || arg === '-C' || arg === '--chdir' || arg === '-S' || arg === '--split-string') {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith('--unset=') || arg.startsWith('--chdir=') || arg.startsWith('--split-string=')
+        || arg === '-i' || arg === '--ignore-environment' || arg === '-0' || arg === '--null') {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('-') && arg !== '-') {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  const command = args[index];
+  return command === undefined ? undefined : { command, args: args.slice(index + 1) };
+}
+
+function unwrapObviousReadCommand(command: string, args: readonly string[]): { command: string; args: readonly string[] } {
+  let current = { command, args };
+  for (let depth = 0; depth < 4; depth += 1) {
+    const executable = basename(current.command);
+    let next: { command: string; args: readonly string[] } | undefined;
+    if (executable === 'systemd-run') next = unwrapSystemdRun(current.args);
+    else if (executable === 'env') next = unwrapEnv(current.args);
+    else if (executable === 'nohup') {
+      const nested = current.args[0] === '--' ? current.args.slice(1) : current.args;
+      const nestedCommand = nested[0];
+      next = nestedCommand === undefined ? undefined : { command: nestedCommand, args: nested.slice(1) };
+    } else break;
+    if (next === undefined) break;
+    current = next;
+  }
+  return current;
+}
+
+function shellReadOperands(command: string, args: readonly string[]): string[] {
+  if (command === 'dd') {
+    return args.flatMap(arg => arg.startsWith('if=') && arg.length > 3 ? [arg.slice(3)] : []);
+  }
+  if (!SHELL_DIRECT_READ_COMMANDS.has(command)) return [];
+  const paths: string[] = [];
+  let options = true;
+  for (const arg of args) {
+    if (options && arg === '--') { options = false; continue; }
+    if (options && arg.startsWith('-') && arg !== '-') continue;
+    if (arg !== '-') paths.push(arg);
+  }
+  return paths;
+}
 
 function shellOperands(command: string, args: readonly string[]): { paths: string[]; parents: boolean } {
   const paths: string[] = [];
@@ -158,6 +256,38 @@ function shellOperands(command: string, args: readonly string[]): { paths: strin
  * it never changes the execution backend and does not try to parse arbitrary
  * wrappers or language runtimes.
  */
+/**
+ * Refuse common direct shell reads of protected paths. This covers obvious
+ * argument-array readers without pretending to sandbox arbitrary runtimes.
+ */
+export async function authorizeShellFilesystemRead(
+  command: string,
+  args: readonly string[],
+  cwd: string | undefined,
+  rules: readonly FilesystemBlockRule[],
+  operation = 'shell.exec',
+): Promise<void> {
+  if (!rules.some(rule => rule.mode === 'deny-read')) return;
+  const unwrapped = unwrapObviousReadCommand(command, args);
+  const executable = basename(unwrapped.command);
+  const base = cwd ?? process.cwd();
+  for (const rawPath of shellReadOperands(executable, unwrapped.args)) {
+    const candidate = resolve(base, rawPath);
+    let candidateReal: string;
+    try {
+      candidateReal = await realpath(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const rule of rules) {
+      if (rule.mode !== 'deny-read') continue;
+      const protectedReal = await canonicalRulePath(rule, operation);
+      if (isWithin(protectedReal, candidateReal)) blocked(rule, operation, candidate);
+    }
+  }
+}
+
 export async function authorizeShellFilesystemMutation(
   command: string,
   args: readonly string[],
@@ -189,6 +319,29 @@ export async function authorizeShellFilesystemMutation(
   }
 }
 
+/** Refuse direct reads of an exact protected file or descendants of a protected directory. */
+export async function authorizePathRead(
+  requestedPath: string,
+  configuredRoots: readonly string[],
+  rules: readonly FilesystemBlockRule[],
+  operation = 'fs.read',
+): Promise<string> {
+  const candidate = await authorizePath(requestedPath, configuredRoots, operation);
+  if (rules.length === 0) return candidate;
+  let candidateReal: string;
+  try {
+    candidateReal = await realpath(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return candidate;
+    throw error;
+  }
+  for (const rule of rules) {
+    if (rule.mode !== 'deny-read') continue;
+    const protectedReal = await canonicalRulePath(rule, operation);
+    if (isWithin(protectedReal, candidateReal)) blocked(rule, operation, candidate);
+  }
+  return candidate;
+}
 
 export async function authorizePath(
   requestedPath: string,
