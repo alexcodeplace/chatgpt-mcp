@@ -131,6 +131,85 @@ const SHELL_DIRECT_READ_COMMANDS = new Set([
   'cp', 'grep', 'sed', 'awk',
 ]);
 
+const SYSTEMD_RUN_OPTIONS_WITH_VALUE = new Set([
+  '-p', '--property', '--unit', '--description', '--slice', '--service-type',
+  '--uid', '--gid', '--nice', '--working-directory', '--setenv', '--umask',
+]);
+
+function unwrapSystemdRun(args: readonly string[]): { command: string; args: readonly string[] } | undefined {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === undefined) return undefined;
+    if (arg === '--') {
+      index += 1;
+      break;
+    }
+    if (!arg.startsWith('-') || arg === '-') break;
+    if (arg.includes('=')) {
+      index += 1;
+      continue;
+    }
+    if (SYSTEMD_RUN_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  const command = args[index];
+  return command === undefined ? undefined : { command, args: args.slice(index + 1) };
+}
+
+function unwrapEnv(args: readonly string[]): { command: string; args: readonly string[] } | undefined {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === undefined) return undefined;
+    if (arg === '--') {
+      index += 1;
+      break;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg === '-u' || arg === '--unset' || arg === '-C' || arg === '--chdir' || arg === '-S' || arg === '--split-string') {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith('--unset=') || arg.startsWith('--chdir=') || arg.startsWith('--split-string=')
+        || arg === '-i' || arg === '--ignore-environment' || arg === '-0' || arg === '--null') {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('-') && arg !== '-') {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  const command = args[index];
+  return command === undefined ? undefined : { command, args: args.slice(index + 1) };
+}
+
+function unwrapObviousReadCommand(command: string, args: readonly string[]): { command: string; args: readonly string[] } {
+  let current = { command, args };
+  for (let depth = 0; depth < 4; depth += 1) {
+    const executable = basename(current.command);
+    let next: { command: string; args: readonly string[] } | undefined;
+    if (executable === 'systemd-run') next = unwrapSystemdRun(current.args);
+    else if (executable === 'env') next = unwrapEnv(current.args);
+    else if (executable === 'nohup') {
+      const nested = current.args[0] === '--' ? current.args.slice(1) : current.args;
+      const nestedCommand = nested[0];
+      next = nestedCommand === undefined ? undefined : { command: nestedCommand, args: nested.slice(1) };
+    } else break;
+    if (next === undefined) break;
+    current = next;
+  }
+  return current;
+}
+
 function shellReadOperands(command: string, args: readonly string[]): string[] {
   if (command === 'dd') {
     return args.flatMap(arg => arg.startsWith('if=') && arg.length > 3 ? [arg.slice(3)] : []);
@@ -189,9 +268,10 @@ export async function authorizeShellFilesystemRead(
   operation = 'shell.exec',
 ): Promise<void> {
   if (!rules.some(rule => rule.mode === 'deny-read')) return;
-  const executable = basename(command);
+  const unwrapped = unwrapObviousReadCommand(command, args);
+  const executable = basename(unwrapped.command);
   const base = cwd ?? process.cwd();
-  for (const rawPath of shellReadOperands(executable, args)) {
+  for (const rawPath of shellReadOperands(executable, unwrapped.args)) {
     const candidate = resolve(base, rawPath);
     let candidateReal: string;
     try {
