@@ -152,6 +152,46 @@ class LiveProofMetadataTests(unittest.TestCase):
             probe.desktop_observation(enabled, {**enabled, 'screenCapture': False}, False)
 
 
+class RouterExecutableReconciliationTests(unittest.TestCase):
+    def test_deleted_expected_node_restarts_only_router_after_idle_boundary(self):
+        with fixture() as f:
+            snapshot = copy.deepcopy(f.route.value)
+            f.state['profiles'] = [{'name': 'p1', 'unit': 'tunnel-one.service'},
+                                   {'name': 'p2', 'unit': 'tunnel-two.service'}]
+            entry = str(Path(f.state['router']['releaseDirectory']) / 'dist/src/hotswap/main.js').encode()
+            pauses = []
+            resumes = []
+            pids = {'tunnel-one.service': 81001, 'tunnel-two.service': 81002,
+                    f.state['ingress']['unit']: 81003}
+            def pause(unit):
+                item = {'unit': unit, 'pid': pids[unit]}
+                pauses.append(item)
+                return item
+            restarted = {**snapshot, 'routerPid': snapshot['routerPid'] + 1}
+            with mock.patch.object(deploy, '_deleted_expected_executable', return_value=True), \
+                 mock.patch.object(deploy, '_router_command', return_value=[b'/usr/bin/node', entry]), \
+                 mock.patch.object(deploy, '_pause_unit', side_effect=pause), \
+                 mock.patch.object(deploy, '_resume_unit', side_effect=lambda item: resumes.append(item)), \
+                 mock.patch.object(deploy, '_wait_router_idle', side_effect=[snapshot, snapshot]), \
+                 mock.patch.object(deploy, 'wait_control', return_value=restarted), \
+                 mock.patch.object(deploy.stager, 'systemctl') as systemctl:
+                result = deploy._reconcile_deleted_router_executable(f.home, f.state, snapshot)
+            self.assertEqual(result['routerPid'], restarted['routerPid'])
+            systemctl.assert_called_once_with('restart', f.state['router']['unit'])
+            self.assertEqual([item['unit'] for item in pauses],
+                             ['tunnel-one.service', 'tunnel-two.service', f.state['ingress']['unit']])
+            self.assertEqual(resumes, [pauses[2], pauses[0], pauses[1]])
+
+    def test_router_reconcile_refuses_nonmatching_deleted_executable(self):
+        with fixture() as f:
+            snapshot = copy.deepcopy(f.route.value)
+            with mock.patch.object(deploy, '_deleted_expected_executable', return_value=False), \
+                 mock.patch.object(deploy.stager, 'systemctl') as systemctl:
+                with self.assertRaisesRegex(hot.ControlError, 'PROVENANCE_MISMATCH'):
+                    deploy._reconcile_deleted_router_executable(f.home, f.state, snapshot)
+            systemctl.assert_not_called()
+
+
 class DeploymentTests(unittest.TestCase):
     def test_generation_descriptor_preserves_rebound_instance(self):
         item = {'id': 'a' * 32, 'instanceId': 'b' * 32, 'url': 'http://127.0.0.1:31001',
