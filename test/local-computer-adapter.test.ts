@@ -452,7 +452,8 @@ test('shell timeout terminates descendants in the command process group', { skip
       command: 'node',
       args: ['-e', descendantScript(), pidFile],
       cwd: root,
-      timeoutMs: 100,
+      // Allow Node startup and descendant creation before testing group termination.
+      timeoutMs: 1_000,
     });
     const childPid = await waitForPidFile(pidFile);
     const result = await execution;
