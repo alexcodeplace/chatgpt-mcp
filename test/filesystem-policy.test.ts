@@ -216,6 +216,19 @@ test('direct shell read guard blocks protected explicit paths, relative aliases,
           && (error as { message?: string }).message === 'use named-key tools',
       );
     }
+    for (const [command, args] of [
+      ['systemd-run', ['--user', '--wait', '--pipe', '--unit=proof', '/usr/bin/cat', protectedFile]],
+      ['systemd-run', ['--user', '--unit', 'proof', 'env', 'TOKEN_SCOPE=test', 'nohup', '/usr/bin/cat', protectedFile]],
+      ['env', ['TOKEN_SCOPE=test', 'cat', protectedFile]],
+      ['nohup', ['--', 'cat', protectedFile]],
+    ] as const) {
+      await assert.rejects(
+        () => authorizeShellFilesystemRead(command, args, f.root, rules),
+        (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED'
+          && (error as { message?: string }).message === 'use named-key tools',
+      );
+    }
+    await authorizeShellFilesystemRead('systemd-run', ['--user', '/usr/bin/cat', ordinary], f.root, rules);
     await authorizeShellFilesystemRead('cat', [ordinary], f.root, rules);
     await authorizeShellFilesystemRead('node', ['-e', 'process.exit(0)'], f.root, rules);
   } finally {

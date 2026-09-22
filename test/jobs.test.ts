@@ -127,13 +127,23 @@ test('durable admission applies deny-read shell guards before launch while unrel
   const config = parseConfig({
     jobs: { enabled: true, directory: join(directory, 'jobs'), launcher: 'detached', maxConcurrent: 2 },
     filesystem: { roots: [directory], blocklist: [{ path: protectedDir, mode: 'deny-read', message: 'Use deck-kmgr.' }] },
-    shell: { enabled: true, allowedCommands: ['cat'] },
+    shell: { enabled: true, allowedCommands: ['cat', 'systemd-run'] },
   });
   let launches = 0;
   try {
     const store = new JobStore(config, async () => { launches++; });
     await assert.rejects(
       store.start('durable-read-denial', { command: 'cat', args: ['protected/token.txt'], cwd: directory }),
+      (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED'
+        && (error as { message?: string }).message === 'Use deck-kmgr.',
+    );
+    assert.equal(launches, 0);
+    await assert.rejects(
+      store.start('durable-wrapper-read-denial', {
+        command: 'systemd-run',
+        args: ['--user', '--wait', '--pipe', '--unit=proof', '/usr/bin/cat', protectedFile],
+        cwd: directory,
+      }),
       (error: unknown) => (error as { code?: string; message?: string }).code === 'PATH_NOT_ALLOWED'
         && (error as { message?: string }).message === 'Use deck-kmgr.',
     );
