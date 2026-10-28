@@ -2,6 +2,7 @@ name: gate
 
 on:
   push:
+    branches-ignore: ['overdeck-build/**']
   pull_request:
 
 permissions:
@@ -31,12 +32,10 @@ jobs:
       - run: pnpm gate
       - name: Prove compiled upgrade and ownership semantics
         run: node --test dist/test/hotswap-gc.test.js dist/test/hotswap-adoption.test.js dist/test/hotswap.test.js dist/test/hotswap-recording.test.js
-      - name: Package verified runtime inputs
-        run: tar -czf mcp-runtime.tgz dist/src node_modules
-      - name: Retain exact-revision runtime for managed deployment
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcp-runtime-${{ github.sha }}
-          path: mcp-runtime.tgz
-          retention-days: 7
-          if-no-files-found: error
+      # This repository explicitly disallows GitHub-hosted artifact uploads.
+      # Verify the immutable package here; operators package the same tested
+      # revision locally with scripts/release.py for managed deployment.
+      - name: Verify immutable exact-revision runtime packaging
+        run: |
+          python3 scripts/release.py pack --source "$GITHUB_WORKSPACE" --destination "$RUNNER_TEMP/mcp-runtime-$GITHUB_SHA" --revision "$GITHUB_SHA"
+          python3 scripts/release.py verify "$RUNNER_TEMP/mcp-runtime-$GITHUB_SHA"

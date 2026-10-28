@@ -298,3 +298,89 @@ test('a stalled stdio initialization is bounded and its child is cleaned up', as
   const pid = Number(await readFile(pidFile, 'utf8'));
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
+
+test('legacy SSE discovers and calls namespaced tools with upstream-only credentials', async t => {
+  let stream: import('node:http').ServerResponse | undefined;
+  const auth: Array<string | undefined> = [];
+  const server = createServer(async (req, res) => {
+    auth.push(req.headers.authorization);
+    if (req.method === 'GET' && req.url === '/sse') {
+      stream = res;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      res.write('event: endpoint\ndata: /message\n\n');
+      return;
+    }
+    let body = '';
+    for await (const chunk of req) body += String(chunk);
+    const request = JSON.parse(body) as { id?: number; method: string; params?: { arguments?: Record<string, unknown> } };
+    res.writeHead(202); res.end();
+    if (request.id === undefined) return;
+    const result = request.method === 'initialize'
+      ? { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'sse-fixture', version: '1' } }
+      : request.method === 'tools/list' ? { tools: [echo] }
+      : { content: [{ type: 'text', text: JSON.stringify(request.params?.arguments) }] };
+    stream?.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: request.id, result })}\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  t.after(async () => {
+    stream?.end(); server.closeAllConnections();
+    await new Promise<void>(done => server.close(() => done()));
+  });
+  const { client } = await downstream(t, { legacy: {
+    transport: 'sse', url: `http://127.0.0.1:${address.port}/sse`, headers: { Authorization: 'Bearer sse-fixture-secret' },
+  } });
+  assert.ok((await client.listTools()).tools.some(tool => tool.name === 'legacy.inspect_scene'));
+  const result = await client.callTool({ name: 'legacy.inspect_scene', arguments: { scene: 'res://sse.tscn' } });
+  assert.equal(result.isError, undefined);
+  assert.ok(auth.length >= 3);
+  assert.ok(auth.every(value => value === 'Bearer sse-fixture-secret'));
+});
+
+test('cancellation releases capacity and overlapping calls respect the upstream limit', async t => {
+  let entered!: () => void;
+  const started = new Promise<void>(done => { entered = done; });
+  let release!: () => void;
+  const held = new Promise<void>(done => { release = done; });
+  t.after(() => release());
+  const source = await upstream(t, { call: async () => {
+    entered(); await held;
+    return { content: [{ type: 'text', text: 'done' }] };
+  } });
+  const proxy = new McpProxy(parseConfig({ proxy: { upstreams: { godot: {
+    transport: 'http', url: source.url, maxConcurrent: 1,
+  } } } }).proxy);
+  t.after(() => proxy.close());
+  const tools = await proxy.tools(); assert.equal(tools.length, 1);
+  const controller = new AbortController();
+  const first = proxy.call(tools[0]!, { scene: 'held' }, controller.signal);
+  await started;
+  assert.equal(errorCode(await proxy.call(tools[0]!, { scene: 'second' }, new AbortController().signal)), 'UPSTREAM_BUSY');
+  assert.equal(source.state.calls.length, 1);
+  controller.abort();
+  assert.equal(errorCode(await first), 'CANCELLED');
+  assert.match(JSON.stringify(proxy.status()), /"activeCalls":0/);
+  release();
+});
+
+test('HTTP redirects cannot forward upstream credentials to another endpoint', async t => {
+  let stolen = 0;
+  const target = createServer((_req, res) => { stolen++; res.end('{}'); });
+  target.listen(0, '127.0.0.1'); await once(target, 'listening');
+  const targetAddress = target.address(); assert.ok(targetAddress && typeof targetAddress === 'object');
+  const redirect = createServer((_req, res) => {
+    res.writeHead(307, { Location: `http://127.0.0.1:${targetAddress.port}/stolen` }); res.end();
+  });
+  redirect.listen(0, '127.0.0.1'); await once(redirect, 'listening');
+  const address = redirect.address(); assert.ok(address && typeof address === 'object');
+  t.after(async () => {
+    for (const server of [target, redirect]) {
+      server.closeAllConnections(); await new Promise<void>(done => server.close(() => done()));
+    }
+  });
+  const { client } = await downstream(t, { redirect: {
+    transport: 'http', url: `http://127.0.0.1:${address.port}/mcp`, headers: { Authorization: 'Bearer never-forward' }, connectTimeoutMs: 1000,
+  } });
+  assert.equal((await client.callTool({ name: 'system.info', arguments: {} })).isError, undefined);
+  assert.equal(stolen, 0);
+});
