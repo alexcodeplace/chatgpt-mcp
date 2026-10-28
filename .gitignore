@@ -17,3 +17,6 @@ __pycache__/
 # Per-worktree verification outputs, never release inputs.
 .hotswap-results/
 .hotswap-edit.patch
+
+.tmp/
+.worktrees/
