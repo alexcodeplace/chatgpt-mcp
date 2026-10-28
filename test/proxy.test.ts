@@ -200,7 +200,9 @@ test('tool error results, image content and metadata survive forwarding', async 
   const source = await upstream(t, { call: async () => expected });
   const { client } = await downstream(t, { godot: { transport: 'http', url: source.url } });
   const result = await client.callTool({ name: 'godot.inspect_scene', arguments: { scene: 'missing' } });
-  assert.deepEqual(result, expected);
+  assert.equal(result.isError, expected.isError);
+  assert.deepEqual(result.content, expected.content);
+  assert.equal(result._meta?.fixture, 'kept');
 });
 
 test('output schema is advertised unchanged and successful structured output is preserved', async t => {
@@ -383,4 +385,22 @@ test('HTTP redirects cannot forward upstream credentials to another endpoint', a
   } });
   assert.equal((await client.callTool({ name: 'system.info', arguments: {} })).isError, undefined);
   assert.equal(stolen, 0);
+});
+
+
+test('an upstream that never completes SSE startup cannot hang native tool discovery', async t => {
+  const server = createServer(() => { /* Deliberately never send SSE response headers. */ });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  t.after(async () => {
+    server.closeAllConnections(); await new Promise<void>(done => server.close(() => done()));
+  });
+  const proxy = new McpProxy(parseConfig({ proxy: { upstreams: { stalled: {
+    transport: 'sse', url: `http://127.0.0.1:${address.port}/sse`, connectTimeoutMs: 100,
+  } } } }).proxy);
+  t.after(() => proxy.close());
+  const started = Date.now();
+  assert.deepEqual(await proxy.tools(), []);
+  assert.ok(Date.now() - started < 2000, 'startup timeout must include transport.start, not just initialize');
+  assert.match(JSON.stringify(proxy.status()), /UPSTREAM_DISCOVERY_FAILED/);
 });

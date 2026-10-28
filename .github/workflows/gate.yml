@@ -32,6 +32,11 @@ jobs:
       - run: pnpm gate
       - name: Prove compiled upgrade and ownership semantics
         run: node --test dist/test/hotswap-gc.test.js dist/test/hotswap-adoption.test.js dist/test/hotswap.test.js dist/test/hotswap-recording.test.js
+      - name: Prove real Godot AI tool discovery and invocation
+        run: |
+          python3 -m venv "$RUNNER_TEMP/godot-ai-4.3.1"
+          "$RUNNER_TEMP/godot-ai-4.3.1/bin/pip" install --disable-pip-version-check 'godot-ai==4.3.1'
+          GODOT_AI_COMMAND="$RUNNER_TEMP/godot-ai-4.3.1/bin/godot-ai" node --test dist/test/proxy-godot.test.js
       # This repository explicitly disallows GitHub-hosted artifact uploads.
       # Verify the immutable package here; operators package the same tested
       # revision locally with scripts/release.py for managed deployment.

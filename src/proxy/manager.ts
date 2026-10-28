@@ -36,6 +36,20 @@ export function exposedToolName(namespace: string, name: string): string {
   return `${full.slice(0, 111)}_${createHash('sha256').update(full).digest('hex').slice(0, 16)}`;
 }
 
+/** Includes transport.start(), which some transports do not bind to connect's signal. */
+async function connectBounded(client: Client, transport: Transport, signal: AbortSignal, timeout: number): Promise<void> {
+  signal.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason); };
+    signal.addEventListener('abort', abort, { once: true });
+    void client.connect(transport, { signal, timeout }).then(() => {
+      signal.removeEventListener('abort', abort); resolve();
+    }, error => {
+      signal.removeEventListener('abort', abort); reject(error);
+    });
+  });
+}
+
 /** Runtime-owned upstream sessions, never owned by an individual HTTP request. */
 export class McpProxy {
   private readonly upstreams: Map<string, UpstreamState>;
@@ -93,7 +107,7 @@ export class McpProxy {
         };
         // Notifications invalidate, but never launch unsolicited network work.
         client.setNotificationHandler('notifications/tools/list_changed', () => { state.expiresAt = 0; });
-        await client.connect(transport, { signal, timeout: state.config.connectTimeoutMs });
+        await connectBounded(client, transport, signal, state.config.connectTimeoutMs);
       }
       const client = state.client;
       if (!client) throw new Error('Upstream disconnected.');
