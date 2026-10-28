@@ -66,11 +66,13 @@ async function upstream(t: TestContext, options: FixtureOptions = {}) {
 }
 
 async function downstream(t: TestContext, upstreams: Record<string, unknown>, proxyOptions: Record<string, unknown> = {}, modern = false) {
-  const config = parseConfig({ logLevel: 'silent', proxy: { upstreams, ...proxyOptions } });
+  const config = parseConfig({ logLevel: 'silent', http: { token: 'downstream-only-fixture-token' }, proxy: { upstreams, ...proxyOptions } });
   const server = await startComputerHttpServer({ ...config, http: { ...config.http, port: 0 } });
   const client = new Client({ name: 'proxy-test', version: '1' }, modern ? { versionNegotiation: { mode: { pin: '2026-07-28' } } } : {});
   t.after(async () => { await client.close(); await server.close(); });
-  await client.connect(new StreamableHTTPClientTransport(new URL(server.endpoint)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(server.endpoint), {
+    requestInit: { headers: { Authorization: 'Bearer downstream-only-fixture-token' } },
+  }));
   return { client, server };
 }
 
@@ -83,7 +85,7 @@ function errorCode(result: CallToolResult): string {
 
 test('proxy is disabled by default and rejects ambiguous or unsafe configuration', () => {
   assert.deepEqual(parseConfig({}).proxy.upstreams, {});
-  for (const name of ['system', 'fs', 'proxy', '__proto__', 'Bad.Name']) {
+  for (const name of ['system', 'fs', 'kmgr', 'proxy', '__proto__', 'Bad.Name']) {
     assert.throws(() => parseConfig({ proxy: { upstreams: { [name]: { transport: 'stdio', command: 'node' } } } }), name);
   }
   for (const config of [
@@ -119,6 +121,7 @@ for (const modern of [false, true]) test(`HTTP proxy preserves raw schemas, argu
   const result = await client.callTool({ name: 'godot.inspect_scene', arguments: args });
   assert.deepEqual(result.structuredContent, args);
   assert.deepEqual(source.state.calls[0]?.arguments, args);
+  assert.ok(source.state.headers.every(value => value === undefined), 'downstream bearer credentials must not reach upstreams');
   assert.equal((await client.callTool({ name: 'system.info', arguments: {} })).isError, undefined);
   await client.callTool({ name: 'godot.inspect_scene', arguments: { scene: 'again' } });
   assert.equal(source.state.lists, 1, 'requests reuse one cached upstream catalogue');

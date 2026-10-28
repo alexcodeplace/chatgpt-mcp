@@ -44,7 +44,7 @@ const upstream = z.discriminatedUnion('transport', [
     ctx.addIssue({ code: 'custom', path: ['url'], message: 'Non-loopback HTTP requires explicit allowInsecureHttp; prefer HTTPS.' });
   }
 });
-const reserved = new Set(['system', 'fs', 'shell', 'exec', 'process', 'service', 'app', 'browser', 'screen', 'input', 'proxy', 'constructor', 'prototype', '__proto__']);
+const reserved = new Set(['system', 'fs', 'shell', 'exec', 'process', 'service', 'app', 'browser', 'screen', 'input', 'kmgr', 'proxy', 'constructor', 'prototype', '__proto__']);
 export const proxySchema = z.object({
   upstreams: z.unknown().superRefine((value, ctx) => {
     if (value && typeof value === 'object' && Object.keys(value).some(name => reserved.has(name))) {
