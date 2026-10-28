@@ -216,7 +216,12 @@ upstream grants must go through the managed deployment's policy-change path.
 
 `pnpm gate` runs type checking, all tests and the build. The focused suite is
 `pnpm exec tsx --test test/proxy.test.ts`. Tests use real HTTP, SSE and child-process
-stdio transports, not only mocked method calls.
+stdio transports, not only mocked method calls. CI also installs the pinned
+Godot AI 4.3.1 package and calls `godot.session_manage` with `op: "list"` through
+the main MCP. This verifies the real server protocol without claiming a connected
+Godot editor. To run that check locally, set `GODOT_AI_COMMAND` to the absolute
+path of an installed compatible `godot-ai` executable and run
+`pnpm exec tsx --test test/proxy-godot.test.ts`.
 
 The repository disallows GitHub-hosted artifact uploads. CI still verifies the
 immutable runtime package with `scripts/release.py`; it does not retain a

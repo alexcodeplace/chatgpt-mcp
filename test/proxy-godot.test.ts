@@ -29,9 +29,9 @@ test('real Godot AI tools are discoverable and callable through the main MCP', {
   const tools = (await client.listTools()).tools;
   const godotTools = tools.filter(tool => tool.name.startsWith('godot.'));
   assert.ok(godotTools.length > 0, JSON.stringify(await client.callTool({ name: 'proxy.status', arguments: {} })));
-  const sessions = godotTools.find(tool => tool.name === 'godot.session_list');
-  assert.ok(sessions, 'Godot AI must advertise its real session_list tool');
-  const result = await client.callTool({ name: sessions.name, arguments: {} });
+  const sessions = godotTools.find(tool => tool.name === 'godot.session_manage');
+  assert.ok(sessions, `Godot AI session_manage missing from: ${godotTools.map(tool => tool.name).join(', ')}`);
+  const result = await client.callTool({ name: sessions.name, arguments: { op: 'list' } });
   assert.notEqual(result.isError, true, JSON.stringify(result));
   assert.ok(result.content.length > 0 || result.structuredContent !== undefined);
   console.log(JSON.stringify({ realGodotTools: godotTools.length, called: sessions.name, success: result.isError !== true }));
