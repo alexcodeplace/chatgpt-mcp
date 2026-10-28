@@ -3,7 +3,8 @@ import { loadConfig } from './config.js';
 import { createComputerMcpServerFactory } from './server.js';
 
 const config = await loadConfig();
-const handle = serveStdio(createComputerMcpServerFactory(config));
+const factory = createComputerMcpServerFactory(config);
+const handle = serveStdio(factory);
 
 if (config.logLevel !== 'silent') {
   console.error('chatgpt-mcp listening on stdio');
@@ -15,7 +16,7 @@ async function shutdown(signal: string): Promise<void> {
   closing = true;
   if (config.logLevel !== 'silent') console.error(`chatgpt-mcp shutting down (${signal})`);
   try {
-    await handle.close();
+    try { await handle.close(); } finally { await factory.close(); }
     process.exitCode = 0;
   } catch (error) {
     console.error(error);
@@ -25,3 +26,5 @@ async function shutdown(signal: string): Promise<void> {
 
 process.once('SIGINT', () => { void shutdown('SIGINT'); });
 process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+
+process.stdin.once('end', () => { void shutdown('stdin ended'); });

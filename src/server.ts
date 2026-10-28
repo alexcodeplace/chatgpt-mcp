@@ -1,3 +1,5 @@
+import { McpProxy } from './proxy/manager.js';
+import { registerProxyTools } from './proxy/register.js';
 import { McpServer } from '@modelcontextprotocol/server';
 import type { ComputerAdapter } from './adapter/computer-adapter.js';
 import { RoutingComputerAdapter } from './adapter/routing-computer-adapter.js';
@@ -21,13 +23,20 @@ export function createComputerMcpServer(
 }
 
 /**
- * Returns the cheap, stateless factory consumed by both MCP transports.
- * The adapter may be shared because the milestone-1 adapter keeps no client/session state.
+ * Downstream MCP instances remain stateless. The factory owns reusable upstream
+ * connections and must be closed by its serving transport at shutdown.
  */
 export function createComputerMcpServerFactory(
   config: Readonly<ChatGptMcpConfig>,
   adapter: ComputerAdapter = new RoutingComputerAdapter(config),
   concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency, config.execution.kubernetes.maxConcurrent),
-): () => McpServer {
-  return () => createComputerMcpServer(config, adapter, concurrency);
+): (() => Promise<McpServer>) & { close(): Promise<void> } {
+  const proxy = new McpProxy(config.proxy);
+  const factory = async (): Promise<McpServer> => {
+    const server = createComputerMcpServer(config, adapter, concurrency);
+    if (proxy.configured) await registerProxyTools(server, proxy, concurrency);
+    return server;
+  };
+  factory.close = () => proxy.close();
+  return factory;
 }

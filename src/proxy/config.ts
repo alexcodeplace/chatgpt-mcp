@@ -46,8 +46,12 @@ const upstream = z.discriminatedUnion('transport', [
 });
 const reserved = new Set(['system', 'fs', 'shell', 'exec', 'process', 'service', 'app', 'browser', 'screen', 'input', 'proxy', 'constructor', 'prototype', '__proto__']);
 export const proxySchema = z.object({
-  upstreams: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/).refine(name => !reserved.has(name), 'Reserved namespace.'), upstream)
-    .default({}).refine(value => Object.keys(value).length <= 32, 'At most 32 upstreams.'),
+  upstreams: z.unknown().superRefine((value, ctx) => {
+    if (value && typeof value === 'object' && Object.keys(value).some(name => reserved.has(name))) {
+      ctx.addIssue({ code: 'custom', message: 'Reserved upstream namespace.' });
+    }
+  }).pipe(z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/).refine(name => !reserved.has(name), 'Reserved namespace.'), upstream)
+    .default({}).refine(value => Object.keys(value).length <= 32, 'At most 32 upstreams.')).prefault({}),
   discoveryTtlMs: z.number().int().min(100).max(3_600_000).default(60_000),
   retryDelayMs: z.number().int().min(100).max(300_000).default(10_000),
   maxResultBytes: z.number().int().min(1024).max(6 * 1024 * 1024).default(6 * 1024 * 1024),

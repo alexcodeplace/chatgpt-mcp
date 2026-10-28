@@ -94,7 +94,8 @@ export function createComputerHttpServer(
   adapter: ComputerAdapter = new RoutingComputerAdapter(config),
   concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency, config.execution.kubernetes.maxConcurrent),
 ): { server: NodeHttpServer; closeHandler(): Promise<void> } {
-  const handler = createMcpHandler(createComputerMcpServerFactory(config, adapter, concurrency), {
+  const factory = createComputerMcpServerFactory(config, adapter, concurrency);
+  const handler = createMcpHandler(factory, {
     legacy: 'stateless',
     responseMode: 'json',
   });
@@ -201,7 +202,9 @@ export function createComputerHttpServer(
     }, transportAbort.signal);
   });
 
-  return { server, closeHandler: handler.close };
+  return { server, async closeHandler(): Promise<void> {
+    try { await handler.close(); } finally { await factory.close(); }
+  } };
 }
 
 export async function startComputerHttpServer(
