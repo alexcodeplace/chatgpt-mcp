@@ -277,8 +277,8 @@ test('stdio sessions are reused, inherit only explicit secrets, and close with t
   const first = await proxy.call(tools[0]!, {}, new AbortController().signal);
   const second = await proxy.call(tools[0]!, {}, new AbortController().signal);
   assert.deepEqual(first.structuredContent, second.structuredContent);
-  assert.equal(first.structuredContent?.explicit, 'explicit-value');
-  assert.equal(first.structuredContent?.inherited, null);
+  assert.equal((first.structuredContent as Record<string, unknown>)?.explicit, 'explicit-value');
+  assert.equal((first.structuredContent as Record<string, unknown>)?.inherited, null);
   const pid = Number(await readFile(pidFile, 'utf8'));
   await proxy.close();
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });

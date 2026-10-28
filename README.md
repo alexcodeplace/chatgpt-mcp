@@ -495,3 +495,11 @@ GitHub Actions runs the same TypeScript gate, Python recovery/deployment fault t
 Remote workspace configuration may define `prepareCommands` as trusted executable-plus-argument arrays. They default to empty and run inside the isolated pod after snapshot/parity checks. Each preparation command may include `whenFiles`, a list of relative workspace paths that must all exist before that command runs. This lets deployments restore project dependencies only for matching workspaces, without shell interpretation, path traversal, or changing public local-only defaults.
 
 The optional Kubernetes backend also exposes `idleCommand` as a deployment configuration array (default `['sleep', 'infinity']`). Deployments that require an init/reaper process may configure an explicit argument array such as `['/usr/bin/tini', '--', 'sleep', 'infinity']`; no shell interpolation is used.
+
+## Upstream MCP tools
+
+Expose configured Godot AI, GitHub, Cloudflare or other MCP tools as namespaced
+sub-tools through this same server. Supports stdio, Streamable HTTP and legacy
+SSE, with separate upstream credentials and per-upstream limits. See
+[the MCP tool proxy guide](docs/MCP-PROXY.md) for configuration, Godot setup,
+security boundaries and unsupported protocol features. Disabled by default.
