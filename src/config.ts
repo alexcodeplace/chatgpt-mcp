@@ -1,3 +1,4 @@
+import { proxySchema } from './proxy/config.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
@@ -274,6 +275,7 @@ const keyManagerSchema = z.object({
 });
 
 const configSchema = z.object({
+  proxy: proxySchema,
   keyManager: keyManagerSchema.prefault({}),
   jobs: jobsSchema.prefault({}),
   execution: executionSchema.default({ defaultBackend: 'local', commandPolicies: [], lightweightTimeoutMs: 30_000, lightweightOutputBytes: 1024 * 1024, localIsolation: { enabled: false, scope: 'user', command: 'systemd-run', managerCommand: 'systemctl', privilegeCommand: 'sudo', privilegeArgs: ['-n'], tasksMax: 512, memoryMaxBytes: 4 * 1024 * 1024 * 1024, cpuWeight: 10, stopTimeoutMs: 3_000 }, kubernetes: { enabled: false, client: { command: 'kubectl', args: [] }, namespace: 'default', imagePullPolicy: 'IfNotPresent', idleCommand: ['sleep', 'infinity'], imagePullSecrets: [], remoteCommands: [], localOnlyCommands: [], heavyCommandPatterns: [], maxConcurrent: 24, startupTimeoutMs: 60_000, cleanupTimeoutMs: 15_000, workspace: { mode: 'snapshot', containerPath: '/workspace', exclude: [], prepareCommands: [], maxArchiveBytes: 2 * 1024 * 1024 * 1024 }, resources: { requests: {}, limits: {} }, nodeSelector: {}, tolerations: [], podLabels: {}, podAnnotations: {}, volumes: [], volumeMounts: [], ttlSeconds: 300, requiredCommands: [], requiredEnvironment: {}, versionChecks: {} } }),
